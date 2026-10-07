@@ -31,6 +31,9 @@ export interface RequestOptions<T extends z.ZodTypeAny> {
   body?: unknown;
   /** Schema for the `data` field of the success envelope. */
   schema: T;
+  /** Accept a success response with no body (`POST /contacts/upsert`
+   *  answers 202 before doing anything). `data` is then undefined. */
+  allowEmptyBody?: boolean;
 }
 
 const DEFAULT_BASE_URL = 'https://incoming.qomon.app';
@@ -121,6 +124,10 @@ export class QomonHttp {
               );
             }
             throw classifyHttpError(res.status, ctx, parsed);
+          }
+
+          if (!text && opts.allowEmptyBody) {
+            return { data: opts.schema.parse(undefined) };
           }
 
           const envelope = z

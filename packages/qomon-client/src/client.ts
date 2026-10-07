@@ -5,6 +5,7 @@ import type {
   ListBundlesParams,
   ListPage,
   QomonApi,
+  SearchContactsParams,
   TransactionCoreFields,
 } from './api.js';
 import { GuardedContactWriter } from './contact-write.js';
@@ -17,9 +18,12 @@ import {
   QomonBundle,
   QomonCodeCampaign,
   QomonContact,
+  QomonForm,
   QomonHistoryEntry,
   QomonTransactionSettings,
   QomonTransactionStatus,
+  type QomonContactUpsert,
+  type QomonFormType,
 } from './types.js';
 
 export type QomonClientOptions = QomonHttpOptions;
@@ -64,6 +68,16 @@ export class QomonClient implements QomonApi {
             schema: z.object({ contact: QomonContact }).or(QomonContact),
           })
           .then((r) => normalizeContact(r.data)),
+      upsertContact: (c) =>
+        this.http
+          .request({
+            method: 'POST',
+            path: '/contacts/upsert',
+            body: { kind: 'contact', data: c },
+            schema: z.unknown(),
+            allowEmptyBody: true,
+          })
+          .then(() => undefined),
     });
   }
 
@@ -188,6 +202,43 @@ export class QomonClient implements QomonApi {
   }
   getContact(id: number) {
     return this.contacts.getContact(id);
+  }
+  upsertContact(contact: QomonContactUpsert) {
+    return this.contacts.upsertContact(contact);
+  }
+
+  async searchContacts(params: SearchContactsParams): Promise<QomonContact[]> {
+    const res = await this.http.request({
+      method: 'POST',
+      path: '/search',
+      body: {
+        data: {
+          advanced_search: {
+            query: params.query,
+            per_page: params.perPage ?? 1000,
+            page: params.page ?? 0,
+            ...(params.sortAttr !== undefined
+              ? { sort_attr: params.sortAttr }
+              : {}),
+            ...(params.sortAsc !== undefined
+              ? { sort_asc: params.sortAsc }
+              : {}),
+          },
+        },
+      },
+      schema: z.object({ contacts: z.array(QomonContact).nullish() }),
+    });
+    return res.data.contacts ?? [];
+  }
+
+  async listFormsByType(type: QomonFormType): Promise<QomonForm[]> {
+    const res = await this.http.request({
+      method: 'GET',
+      path: `/v1/forms/type/${type}`,
+      // `data` is an object holding the list, not the list itself
+      schema: z.object({ forms: z.array(QomonForm).nullish() }),
+    });
+    return res.data.forms ?? [];
   }
 }
 

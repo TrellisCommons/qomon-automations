@@ -1,6 +1,13 @@
 import { describe } from 'vitest';
 import { QomonClient } from './client.js';
-import { runQomonContractSuite } from './contract-suite.js';
+import { disposableName, runQomonContractSuite } from './contract-suite.js';
+
+const POLL_MS = 2_000;
+const EVENTUALLY_MS = 60_000;
+/** Longer than any upsert delay seen in the sandbox. */
+const SETTLE_MS = 30_000;
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /**
  * Runs the same contract suite against a real Qomon sandbox space. Skipped
@@ -18,7 +25,7 @@ const key = enabled ? resolveKey() : null;
 
 const suite = enabled && key ? describe : describe.skip;
 
-suite('sandbox', { timeout: 30_000 }, () => {
+suite('sandbox', { timeout: 120_000 }, () => {
   runQomonContractSuite('qomon sandbox', async () => {
     const api = new QomonClient({
       apiKey: key!,
@@ -58,6 +65,33 @@ suite('sandbox', { timeout: 30_000 }, () => {
           contactId: contact.id,
         };
       },
+      // Invented, unique data: an upsert can never match a real contact by
+      // name or email, and the search tests find only these.
+      async makeContact(fields = {}) {
+        const { id } = await api.createContact({
+          firstname: 'Contract',
+          surname: disposableName('Sandbox'),
+          mail: `${disposableName('contract')}@example.org`,
+          address: {
+            housenumber: '123',
+            street: 'Example St',
+            city: 'Testville',
+          },
+          ...fields,
+        });
+        return id;
+      },
+      async eventually(check) {
+        const deadline = Date.now() + EVENTUALLY_MS;
+        for (;;) {
+          const value = await check();
+          if (value !== undefined) return value;
+          if (Date.now() > deadline)
+            throw new Error('eventually: condition never held');
+          await sleep(POLL_MS);
+        }
+      },
+      settle: () => sleep(SETTLE_MS),
     };
   });
 });

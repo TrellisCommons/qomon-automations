@@ -9,6 +9,7 @@ import {
 import {
   GuardedContactWriter,
   IncompleteContactError,
+  UpsertWithoutIdError,
   mergeContact,
 } from './contact-write.js';
 
@@ -130,6 +131,7 @@ describe('GuardedContactWriter', () => {
       id,
     })),
     getContact: vi.fn(async (id: number) => ({ id })),
+    upsertContact: vi.fn(async () => {}),
   };
 
   it('creates via the synchronous path and returns the id', async () => {
@@ -180,6 +182,7 @@ describe('GuardedContactWriter', () => {
         return c;
       },
       getContact: async (id) => structuredClone(store.get(id)!),
+      upsertContact: async () => {},
     });
     // no email on file: a plain replace would refuse this contact
     const updated = await w.updateContact(7, {
@@ -193,6 +196,26 @@ describe('GuardedContactWriter', () => {
       phone: '555',
       address: { street: 'New St', city: 'Guelph', lat: 1 },
     });
+  });
+});
+
+describe('GuardedContactWriter.upsertContact', () => {
+  it('refuses an upsert without a positive integer id', async () => {
+    const upsertContact = vi.fn(async () => {});
+    const w = new GuardedContactWriter({
+      createContact: async (c) => c,
+      replaceContact: async (_id, c) => c,
+      getContact: async (id) => ({ id }),
+      upsertContact,
+    });
+    for (const id of [0, -1, 1.5, Number.NaN, undefined]) {
+      await expect(
+        w.upsertContact({ id: id as number, firstname: 'A' }),
+      ).rejects.toBeInstanceOf(UpsertWithoutIdError);
+    }
+    expect(upsertContact).not.toHaveBeenCalled();
+    await w.upsertContact({ id: 7, firstname: 'A' });
+    expect(upsertContact).toHaveBeenCalledWith({ id: 7, firstname: 'A' });
   });
 });
 

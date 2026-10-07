@@ -1,4 +1,4 @@
-import type { QomonContact } from './types.js';
+import type { QomonContact, QomonContactUpsert } from './types.js';
 
 /**
  * Guarded contact-write wrapper (data-model §4, qomon-api-reference §6 gap 14).
@@ -10,10 +10,14 @@ import type { QomonContact } from './types.js';
  *  - `PATCH /contacts/{id}` behaves as a full replace: any omitted field is
  *    cleared.
  *
- * This wrapper exposes only the safe operations: the synchronous create (which
- * yields an id in one round trip) and a field-complete replace that refuses to
- * run unless the caller supplied a whole object. The async upsert is not
- * reachable through it.
+ * This wrapper exposes the synchronous create (which yields an id in one
+ * round trip), a field-complete replace that refuses to run unless the caller
+ * supplied a whole object, and an upsert that refuses to run without a Qomon
+ * id. Upsert is how a single form answer such as Presence gets written
+ * without resending the whole contact, so it is reachable here, but only by
+ * id: without one, Qomon matches on email and name and may update a different
+ * contact. It still drops records silently, so every upsert must be verified
+ * by reading the contact back.
  */
 
 export class IncompleteContactError extends Error {
@@ -25,10 +29,20 @@ export class IncompleteContactError extends Error {
   }
 }
 
+export class UpsertWithoutIdError extends Error {
+  constructor() {
+    super(
+      'upsertContact needs a Qomon contact id; without one Qomon matches on name and email',
+    );
+    this.name = 'UpsertWithoutIdError';
+  }
+}
+
 export interface ContactWriteTransport {
   createContact(contact: QomonContact): Promise<QomonContact>;
   replaceContact(id: number, contact: QomonContact): Promise<QomonContact>;
   getContact(id: number): Promise<QomonContact>;
+  upsertContact(contact: QomonContactUpsert): Promise<void>;
 }
 
 /** Fields we insist are present on a full replace so a PATCH cannot blank a
@@ -79,6 +93,16 @@ export class GuardedContactWriter {
   getContact(id: number): Promise<QomonContact> {
     return this.transport.getContact(id);
   }
+
+  async upsertContact(contact: QomonContactUpsert): Promise<void> {
+    assertUpsertId(contact);
+    await this.transport.upsertContact(contact);
+  }
+}
+
+export function assertUpsertId(contact: QomonContactUpsert): void {
+  if (!Number.isInteger(contact.id) || contact.id <= 0)
+    throw new UpsertWithoutIdError();
 }
 
 /** `changes` onto `current`, keeping every field (and address key) the

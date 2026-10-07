@@ -2,6 +2,9 @@ import type {
   QomonBundle,
   QomonCodeCampaign,
   QomonContact,
+  QomonContactUpsert,
+  QomonForm,
+  QomonFormType,
   QomonHistoryEntry,
   QomonTransactionSettings,
   QomonTransactionStatus,
@@ -44,6 +47,63 @@ export interface TransactionCoreFields {
   contact_id: number;
   date: string;
   payment_method_kind?: string;
+}
+
+/** A condition on a contact attribute, such as `address.city`. */
+export interface SearchAttributeCondition {
+  attr: string;
+  ope: string;
+  value?: string | null;
+  from?: string | null;
+  to?: string | null;
+}
+
+/** A condition on a form answer (`attr: 'form'`), such as "Presence exists". */
+export interface SearchFormCondition {
+  attr: 'form' | 'custom_fields';
+  ope: string;
+  form_id: number;
+  form_ref_ids: number[];
+  value?: string | null;
+  from?: string | null;
+  to?: string | null;
+}
+
+export type SearchCondition = {
+  $condition: SearchAttributeCondition | SearchFormCondition;
+};
+
+/** Level 2 of a search query: a logic operator over conditions. */
+export type SearchNode =
+  { $all: SearchCondition[] } | { $at_least_one: SearchCondition[] };
+
+/**
+ * A `POST /search` query. Qomon accepts exactly two levels: a root logic
+ * operator over nodes, each node a logic operator over conditions. A
+ * condition directly under the root is rejected (422). `{ $all: [] }`
+ * matches every contact.
+ */
+export type SearchQuery =
+  { $all: SearchNode[] } | { $at_least_one: SearchNode[] };
+
+export type SearchSortAttr =
+  | 'surname'
+  | 'firstname'
+  | 'birthdate'
+  | 'gender'
+  | 'lastchange'
+  | 'mail'
+  | 'married_name'
+  | 'city';
+
+export interface SearchContactsParams {
+  query: SearchQuery;
+  /** 1 to 1000; default 1000. */
+  perPage?: number;
+  /** zero-based; default 0. */
+  page?: number;
+  sortAttr?: SearchSortAttr;
+  sortAsc?: boolean;
 }
 
 /**
@@ -95,4 +155,15 @@ export interface QomonApi {
     changes: Partial<QomonContact>,
   ): Promise<QomonContact>;
   getContact(id: number): Promise<QomonContact>;
+
+  /** One page of `POST /search`. Qomon returns no total; a page shorter
+   *  than `perPage` is the last one. See `paginateContacts`. */
+  searchContacts(params: SearchContactsParams): Promise<QomonContact[]>;
+  /** Every form of one type, with its accepted values. */
+  listFormsByType(type: QomonFormType): Promise<QomonForm[]>;
+  /** `POST /contacts/upsert` by Qomon id. Asynchronous: Qomon answers 202
+   *  before applying it, and drops a record with an unknown form, label, or
+   *  value without any error. A caller must read the contact back to know
+   *  whether the write landed. Refuses a contact without an id. */
+  upsertContact(contact: QomonContactUpsert): Promise<void>;
 }

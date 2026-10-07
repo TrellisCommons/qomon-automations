@@ -4,6 +4,10 @@ import type {
   ListBundlesParams,
   ListPage,
   QomonApi,
+  SearchCondition,
+  SearchContactsParams,
+  SearchNode,
+  SearchQuery,
   TransactionCoreFields,
 } from './api.js';
 import {
@@ -15,11 +19,16 @@ import {
   syncedFieldsToQomon,
   type QomonSyncedFields,
 } from './transaction-extra-fields.js';
-import { mergeContact } from './contact-write.js';
+import { assertUpsertId, mergeContact } from './contact-write.js';
 import type {
   QomonBundle,
   QomonCodeCampaign,
   QomonContact,
+  QomonContactUpsert,
+  QomonForm,
+  QomonFormAnswer,
+  QomonFormData,
+  QomonFormType,
   QomonHistoryEntry,
   QomonTransaction,
   QomonTransactionSettings,
@@ -35,6 +44,10 @@ import type {
  *  - synchronous contact create returning an id
  *  - full-replace contact PATCH
  *  - structured errors with HTTP-ish status codes
+ *  - `POST /search` over a two-level query, paged with no total
+ *  - forms by type, `data` wrapped in an object
+ *  - asynchronous upsert by id: applied a few calls later, and dropped
+ *    without an error when it names an unknown contact, form, or value
  *
  * CI runs the contract suite against this fake with no network. The same suite
  * runs against the sandbox when QOMON_SANDBOX=1 (see sandbox.test.ts).
@@ -45,6 +58,42 @@ export interface InMemoryQomonOptions {
   statuses?: QomonTransactionStatus[];
   codeCampaigns?: QomonCodeCampaign[];
   settings?: Partial<QomonTransactionSettings>;
+  /** Forms by type. Defaults to one Presence form with the four canvass
+   *  values. */
+  forms?: Partial<Record<QomonFormType, QomonForm[]>>;
+  /** Calls after an upsert before it becomes visible (default 1). */
+  upsertLagCalls?: number;
+}
+
+/** Upsert keys that carry form answers, all resolved the same way. */
+const FORM_ANSWER_KEYS = [
+  'name_presences',
+  'status',
+  'consents',
+  'forms',
+  'actions',
+] as const;
+
+export const FAKE_PRESENCE_FORM: QomonForm = {
+  id: 9001,
+  label: 'Presence',
+  type: 'radio',
+  refvalues: [
+    { id: 9101, form_id: 9001, label: 'Absent', value: 'Absent' },
+    { id: 9102, form_id: 9001, label: 'Accepted', value: 'Accepted' },
+    { id: 9103, form_id: 9001, label: 'Refused', value: 'Refused' },
+    {
+      id: 9104,
+      form_id: 9001,
+      label: 'Come back later',
+      value: 'Come back later',
+    },
+  ],
+};
+
+interface PendingUpsert {
+  contact: QomonContactUpsert;
+  visibleAtCall: number;
 }
 
 let idSeq = 100_000;
@@ -69,6 +118,11 @@ export class InMemoryQomon implements QomonApi {
   private readonly statuses: QomonTransactionStatus[];
   private readonly codeCampaigns: QomonCodeCampaign[];
   private readonly settings: QomonTransactionSettings;
+  private readonly forms: Map<QomonFormType, QomonForm[]>;
+  private readonly upsertLagCalls: number;
+  private pendingUpserts: PendingUpsert[] = [];
+  /** Upserts Qomon would have accepted with a 202 and then thrown away. */
+  droppedUpserts: QomonContactUpsert[] = [];
 
   /** Fault injection: number of leading calls to fail, and with what. */
   failFor = 0;
@@ -90,6 +144,12 @@ export class InMemoryQomon implements QomonApi {
       default_status_id: 1,
       ...opts.settings,
     };
+    this.forms = new Map(
+      Object.entries(
+        opts.forms ?? { presence_status: [FAKE_PRESENCE_FORM] },
+      ) as Array<[QomonFormType, QomonForm[]]>,
+    );
+    this.upsertLagCalls = opts.upsertLagCalls ?? 1;
   }
 
   authenticate(key: string): void {
@@ -105,6 +165,7 @@ export class InMemoryQomon implements QomonApi {
 
   private tick(): void {
     this.callCount += 1;
+    this.applyDueUpserts();
     if (this.failFor > 0) {
       this.failFor -= 1;
       throw this.failWith();
@@ -148,7 +209,8 @@ export class InMemoryQomon implements QomonApi {
 
   seedContact(contact: QomonContact): QomonContact {
     const id = contact.id ?? nextId();
-    const full = { ...contact, id };
+    const now = new Date().toISOString();
+    const full = { CreatedAt: now, UpdatedAt: now, ...contact, id };
     this.contacts.set(id, full);
     return structuredClone(full);
   }
@@ -351,4 +413,242 @@ export class InMemoryQomon implements QomonApi {
     }
     return structuredClone(c);
   }
+
+  async upsertContact(contact: QomonContactUpsert): Promise<void> {
+    assertUpsertId(contact);
+    this.tick();
+    this.pendingUpserts.push({
+      contact: structuredClone(contact),
+      visibleAtCall: this.callCount + this.upsertLagCalls,
+    });
+  }
+
+  /** Apply every queued upsert now, as if Qomon's queue drained. */
+  flushUpserts(): void {
+    for (const p of this.pendingUpserts) this.applyUpsert(p.contact);
+    this.pendingUpserts = [];
+  }
+
+  private applyDueUpserts(): void {
+    const due = this.pendingUpserts.filter(
+      (p) => p.visibleAtCall <= this.callCount,
+    );
+    if (due.length === 0) return;
+    this.pendingUpserts = this.pendingUpserts.filter(
+      (p) => p.visibleAtCall > this.callCount,
+    );
+    for (const p of due) this.applyUpsert(p.contact);
+  }
+
+  private applyUpsert(upsert: QomonContactUpsert): void {
+    const current = this.contacts.get(upsert.id);
+    if (!current) {
+      this.droppedUpserts.push(upsert);
+      return;
+    }
+    const answers: QomonFormData[] = [];
+    for (const key of FORM_ANSWER_KEYS) {
+      for (const answer of upsert[key] ?? []) {
+        const formData = this.resolveAnswer(answer, upsert.id);
+        if (!formData) {
+          this.droppedUpserts.push(upsert);
+          return;
+        }
+        answers.push(formData);
+      }
+    }
+    const { id, address, ...rest } = upsert;
+    const fields = Object.fromEntries(
+      Object.entries(rest).filter(
+        ([k]) => !(FORM_ANSWER_KEYS as readonly string[]).includes(k),
+      ),
+    );
+    const formIds = new Set(answers.map((a) => a.form_id));
+    const next: QomonContact = {
+      ...current,
+      ...fields,
+      id,
+      UpdatedAt: new Date().toISOString(),
+      formdatas: [
+        ...(current.formdatas ?? []).filter((f) => !formIds.has(f.form_id)),
+        ...answers,
+      ],
+    };
+    if (address !== undefined)
+      next.address = { ...(current.address ?? {}), ...address };
+    this.contacts.set(id, next);
+  }
+
+  private resolveAnswer(
+    answer: QomonFormAnswer,
+    contactId: number,
+  ): QomonFormData | null {
+    const all = [...this.forms.values()].flat();
+    const form = all.find((f) =>
+      answer.id !== undefined ? f.id === answer.id : f.label === answer.label,
+    );
+    const ref = form?.refvalues.find((r) => r.value === answer.value);
+    if (!form || !ref) return null;
+    const now = new Date().toISOString();
+    return {
+      id: nextId(),
+      contact_id: contactId,
+      form_id: form.id,
+      form_ref_id: ref.id,
+      data: ref.value,
+      date: typeof answer.date === 'string' ? answer.date : now,
+      created_at: now,
+      updated_at: now,
+    };
+  }
+
+  seedForm(type: QomonFormType, form: QomonForm): QomonForm {
+    this.forms.set(type, [...(this.forms.get(type) ?? []), form]);
+    return structuredClone(form);
+  }
+
+  async listFormsByType(type: QomonFormType): Promise<QomonForm[]> {
+    this.tick();
+    return structuredClone(this.forms.get(type) ?? []);
+  }
+
+  async searchContacts(params: SearchContactsParams): Promise<QomonContact[]> {
+    this.tick();
+    const perPage = params.perPage ?? 1000;
+    if (!Number.isInteger(perPage) || perPage < 1 || perPage > 1000) {
+      throw new QomonValidationError('per_page must be 1 to 1000', {
+        method: 'POST',
+        path: '/search',
+        attempt: 1,
+        httpStatus: 422,
+      });
+    }
+    validateQuery(params.query);
+    const page = params.page ?? 0;
+    const matches = [...this.contacts.values()]
+      .filter((c) => matchesQuery(c, params.query))
+      .sort((a, b) => a.id! - b.id!);
+    return matches
+      .slice(page * perPage, (page + 1) * perPage)
+      .map(({ formdatas: _formdatas, ...c }) => structuredClone(c));
+  }
+}
+
+function invalidQuery(detail: string): QomonValidationError {
+  return new QomonValidationError(`validation failed: ${detail}`, {
+    method: 'POST',
+    path: '/search',
+    attempt: 1,
+    httpStatus: 422,
+  });
+}
+
+function validateQuery(query: SearchQuery): void {
+  const nodes =
+    '$all' in query
+      ? query.$all
+      : '$at_least_one' in query
+        ? query.$at_least_one
+        : null;
+  if (!Array.isArray(nodes))
+    throw invalidQuery('expected $all or $at_least_one at the root');
+  for (const node of nodes) {
+    const conditions =
+      '$all' in node
+        ? node.$all
+        : '$at_least_one' in node
+          ? node.$at_least_one
+          : null;
+    if (!Array.isArray(conditions))
+      throw invalidQuery('a condition must sit under a level-2 node');
+    for (const c of conditions) {
+      if (!c || typeof c !== 'object' || !('$condition' in c)) {
+        throw invalidQuery('a level-2 node holds only conditions');
+      }
+    }
+  }
+}
+
+function logic<T>(
+  node: { $all: T[] } | { $at_least_one: T[] },
+  test: (item: T) => boolean,
+): boolean {
+  if ('$all' in node) return node.$all.every(test);
+  if ('$at_least_one' in node) return node.$at_least_one.some(test);
+  throw invalidQuery('expected $all or $at_least_one');
+}
+
+function matchesQuery(contact: QomonContact, query: SearchQuery): boolean {
+  return logic<SearchNode>(query, (node) => {
+    if ('$condition' in node)
+      throw invalidQuery('a condition must sit under a level-2 node');
+    return logic<SearchCondition>(node, (c) => matchesCondition(contact, c));
+  });
+}
+
+function matchesCondition(
+  contact: QomonContact,
+  { $condition: c }: SearchCondition,
+): boolean {
+  if (c === undefined)
+    throw invalidQuery('a level-2 node holds only conditions');
+  if (c.attr === 'form' || c.attr === 'custom_fields') {
+    const cond = c as Extract<typeof c, { form_id: number }>;
+    const answers = (contact.formdatas ?? []).filter(
+      (f) =>
+        f.form_id === cond.form_id &&
+        !f.deleted_at &&
+        (cond.form_ref_ids.length === 0 ||
+          cond.form_ref_ids.includes(f.form_ref_id ?? -1)),
+    );
+    switch (c.ope) {
+      case 'ext':
+        return answers.length > 0;
+      case 'not_ext':
+        return answers.length === 0;
+      case 'eql':
+        return answers.some((f) => f.data === c.value);
+      default:
+        throw invalidQuery(`the fake does not support form operator ${c.ope}`);
+    }
+  }
+  const actual = readPath(contact, c.attr);
+  const present = actual !== undefined && actual !== null && actual !== '';
+  switch (c.ope) {
+    case 'ext':
+      return present;
+    case 'not_ext':
+      return !present;
+    case 'eql':
+      return (
+        present &&
+        String(actual).toLowerCase() === String(c.value ?? '').toLowerCase()
+      );
+    case 'not_eql':
+      return (
+        !present ||
+        String(actual).toLowerCase() !== String(c.value ?? '').toLowerCase()
+      );
+    case 'start_with':
+      return (
+        present &&
+        String(actual)
+          .toLowerCase()
+          .startsWith(String(c.value ?? '').toLowerCase())
+      );
+    default:
+      throw invalidQuery(`the fake does not support operator ${c.ope}`);
+  }
+}
+
+function readPath(value: unknown, path: string): unknown {
+  return path
+    .split('.')
+    .reduce<unknown>(
+      (v, key) =>
+        v && typeof v === 'object'
+          ? (v as Record<string, unknown>)[key]
+          : undefined,
+      value,
+    );
 }

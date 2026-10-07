@@ -154,11 +154,36 @@ export const QomonHistoryEntry = z
   .passthrough();
 export type QomonHistoryEntry = z.infer<typeof QomonHistoryEntry>;
 
+/** Qomon's examples show some address parts (house number, postal code,
+ *  floor) as numbers; accept either and normalize to a string. */
+const looseString = z
+  .union([z.string(), z.number().transform((n) => String(n))])
+  .nullish();
+
+/** One answer to a form (Presence, consent, survey, ...) on a contact: a
+ *  contact (`contact_id`) picked a refvalue (`form_ref_id`) of a form
+ *  (`form_id`). */
+export const QomonFormData = z
+  .object({
+    id: z.number().int().optional(),
+    form_id: z.number().int(),
+    form_ref_id: z.number().int().nullish(),
+    data: z.string().nullish(),
+    date: z.string().nullish(),
+    created_at: z.string().nullish(),
+    updated_at: z.string().nullish(),
+    deleted_at: z.string().nullish(),
+  })
+  .passthrough();
+export type QomonFormData = z.infer<typeof QomonFormData>;
+
 /** Full Qomon Contact (subset the tool touches). PATCH is a full replace, so
  *  the guarded writer requires the whole object. */
 export const QomonContact = z
   .object({
     id: z.number().int().optional(),
+    CreatedAt: z.string().optional(),
+    UpdatedAt: z.string().optional(),
     firstname: z.string().nullish(),
     surname: z.string().nullish(),
     married_name: z.string().nullish(),
@@ -167,16 +192,84 @@ export const QomonContact = z
     mobile: z.string().nullish(),
     address: z
       .object({
-        housenumber: z.string().nullish(),
-        street: z.string().nullish(),
-        postalcode: z.string().nullish(),
-        city: z.string().nullish(),
-        state: z.string().nullish(),
-        country: z.string().nullish(),
+        housenumber: looseString,
+        street: looseString,
+        /** Qomon's "Address line 2". */
+        addition: looseString,
+        building: looseString,
+        floor: looseString,
+        door: looseString,
+        postalcode: looseString,
+        city: looseString,
+        state: looseString,
+        country: looseString,
       })
       .passthrough()
       .nullish(),
     black_list: z.boolean().optional(),
+    /** Answers to every form except custom fields; Presence is one of them. */
+    formdatas: z.array(QomonFormData).nullish(),
   })
   .passthrough();
 export type QomonContact = z.infer<typeof QomonContact>;
+
+export const QOMON_FORM_TYPES = [
+  'consent',
+  'level_of_support',
+  'presence_status',
+  'custom_fields',
+  'survey',
+  'tasks',
+] as const;
+export type QomonFormType = (typeof QOMON_FORM_TYPES)[number];
+
+/** One accepted value of a form. A write names the value by `value`; a
+ *  contact's formdata points at it by `id` (`form_ref_id`). */
+export const QomonRefValue = z
+  .object({
+    id: z.number().int(),
+    form_id: z.number().int().optional(),
+    label: z.string().nullish(),
+    value: z.string().nullish(),
+  })
+  .passthrough();
+export type QomonRefValue = z.infer<typeof QomonRefValue>;
+
+export const QomonForm = z
+  .object({
+    id: z.number().int(),
+    label: z.string().nullish(),
+    type: z.string().nullish(),
+    refvalues: z.array(QomonRefValue).default([]),
+  })
+  .passthrough();
+export type QomonForm = z.infer<typeof QomonForm>;
+
+/** An answer to a form in an upsert, naming the form by id or label. */
+export interface QomonFormAnswer {
+  id?: number;
+  label?: string;
+  value: string;
+  [k: string]: unknown;
+}
+
+/**
+ * Body of `POST /contacts/upsert` (sent as `{kind: 'contact', data}`).
+ * `id` is required here although Qomon does not require it: without one,
+ * Qomon matches on email and name, or on name and address, and may update a
+ * different contact or create a new one.
+ */
+export interface QomonContactUpsert {
+  id: number;
+  firstname?: string;
+  surname?: string;
+  mail?: string;
+  address?: Record<string, string>;
+  name_presences?: QomonFormAnswer[];
+  status?: QomonFormAnswer[];
+  consents?: QomonFormAnswer[];
+  forms?: QomonFormAnswer[];
+  custom_fields?: QomonFormAnswer[];
+  actions?: QomonFormAnswer[];
+  [k: string]: unknown;
+}
