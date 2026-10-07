@@ -49,7 +49,10 @@ export interface TransactionCoreFields {
   payment_method_kind?: string;
 }
 
-/** A condition on a contact attribute, such as `address.city`. */
+/** A condition on a contact attribute, such as `address.city`. `eql` is a
+ *  case-insensitive token or prefix match, not equality: `address.city eql
+ *  "Test"` also finds "Testville" (sandbox, 2026-10). Treat results as a
+ *  superset and compare exactly in code. */
 export interface SearchAttributeCondition {
   attr: string;
   ope: string;
@@ -157,7 +160,8 @@ export interface QomonApi {
   getContact(id: number): Promise<QomonContact>;
 
   /** One page of `POST /search`. Qomon returns no total; a page shorter
-   *  than `perPage` is the last one. See `paginateContacts`. */
+   *  than `perPage` is the last one. See `paginateContacts`. Each contact
+   *  carries its form answers (`formdatas`, with dates) when it has any. */
   searchContacts(params: SearchContactsParams): Promise<QomonContact[]>;
   /** Every form of one type, with its accepted values. */
   listFormsByType(type: QomonFormType): Promise<QomonForm[]>;

@@ -48,6 +48,8 @@ import type {
  *  - forms by type, `data` wrapped in an object
  *  - asynchronous upsert by id: applied a few calls later, and dropped
  *    without an error when it names an unknown contact, form, or value
+ *  - one answer per form: a new Presence replaces the old one, dated when
+ *    the write was applied whatever date the caller sent
  *
  * CI runs the contract suite against this fake with no network. The same suite
  * runs against the sandbox when QOMON_SANDBOX=1 (see sandbox.test.ts).
@@ -487,7 +489,10 @@ export class InMemoryQomon implements QomonApi {
     const form = all.find((f) =>
       answer.id !== undefined ? f.id === answer.id : f.label === answer.label,
     );
-    const ref = form?.refvalues.find((r) => r.value === answer.value);
+    // Qomon accepts a refvalue's label as well as its value.
+    const ref = form?.refvalues.find(
+      (r) => r.value === answer.value || r.label === answer.value,
+    );
     if (!form || !ref) return null;
     const now = new Date().toISOString();
     return {
@@ -496,7 +501,8 @@ export class InMemoryQomon implements QomonApi {
       form_id: form.id,
       form_ref_id: ref.id,
       data: ref.value,
-      date: typeof answer.date === 'string' ? answer.date : now,
+      // Qomon ignores a requested date and records when it applied the write.
+      date: now,
       created_at: now,
       updated_at: now,
     };
@@ -530,7 +536,7 @@ export class InMemoryQomon implements QomonApi {
       .sort((a, b) => a.id! - b.id!);
     return matches
       .slice(page * perPage, (page + 1) * perPage)
-      .map(({ formdatas: _formdatas, ...c }) => structuredClone(c));
+      .map((c) => structuredClone(c));
   }
 }
 

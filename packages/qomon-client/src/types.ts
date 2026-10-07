@@ -265,6 +265,7 @@ export interface QomonContactUpsert {
   surname?: string;
   mail?: string;
   address?: Record<string, string>;
+  /** Presence. Qomon silently drops `presence_status` (sandbox, 2026-10). */
   name_presences?: QomonFormAnswer[];
   status?: QomonFormAnswer[];
   consents?: QomonFormAnswer[];

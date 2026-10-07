@@ -199,9 +199,12 @@ export function runQomonContractSuite(
           },
         ],
       };
+      // `eql` is a token match, not equality: it also finds earlier runs'
+      // contacts, so filter exactly here as any caller must.
       const found = await h.eventually(async () => {
         const contacts = await collectContacts(h.api, query, { pageSize: 1 });
-        return contacts.length >= ids.size ? contacts : undefined;
+        const exact = contacts.filter((c) => c.surname === surname);
+        return exact.length >= ids.size ? exact : undefined;
       });
       expect(new Set(found.map((c) => c.id))).toEqual(ids);
     });
@@ -246,6 +249,75 @@ export function runQomonContractSuite(
         return c.formdatas?.find((f) => f.form_id === form!.id);
       });
       expect(answer.form_ref_id).toBe(ref.id);
+    });
+
+    it('a second Presence replaces the first, dated at write time', async () => {
+      const h = await setup();
+      const [form] = await h.api.listFormsByType('presence_status');
+      const [first, second] = form!.refvalues;
+      const id = await h.makeContact({ surname: disposableName('Replace') });
+      const startedAt = Date.now();
+      await h.api.upsertContact({
+        id,
+        name_presences: [{ id: form!.id, value: first!.value! }],
+      });
+      await h.eventually(async () => {
+        const c = await h.api.getContact(id);
+        return c.formdatas?.find((f) => f.form_ref_id === first!.id);
+      });
+      await h.api.upsertContact({
+        id,
+        name_presences: [
+          { id: form!.id, value: second!.value!, date: '2020-01-01T00:00:00Z' },
+        ],
+      });
+      const answers = await h.eventually(async () => {
+        const c = await h.api.getContact(id);
+        const mine = c.formdatas?.filter((f) => f.form_id === form!.id) ?? [];
+        return mine.some((f) => f.form_ref_id === second!.id)
+          ? mine
+          : undefined;
+      });
+      expect(answers).toHaveLength(1);
+      expect(Date.parse(answers[0]!.date!)).toBeGreaterThan(
+        startedAt - 5 * 60_000,
+      );
+    });
+
+    it('search returns Presence answers inline, with their date', async () => {
+      const h = await setup();
+      const [form] = await h.api.listFormsByType('presence_status');
+      const surname = disposableName('Inline');
+      const id = await h.makeContact({ surname });
+      await h.api.upsertContact({
+        id,
+        name_presences: [{ id: form!.id, value: form!.refvalues[0]!.value! }],
+      });
+      const query = {
+        $all: [
+          {
+            $all: [
+              { $condition: { attr: 'surname', ope: 'eql', value: surname } },
+              {
+                $condition: {
+                  attr: 'form' as const,
+                  ope: 'ext',
+                  form_id: form!.id,
+                  form_ref_ids: [],
+                },
+              },
+            ],
+          },
+        ],
+      };
+      const [found] = await h.eventually(async () => {
+        const contacts = await collectContacts(h.api, query);
+        const exact = contacts.filter((c) => c.surname === surname);
+        return exact.length > 0 ? exact : undefined;
+      });
+      const answer = found!.formdatas?.find((f) => f.form_id === form!.id);
+      expect(answer?.form_ref_id).toBe(form!.refvalues[0]!.id);
+      expect(typeof answer?.date).toBe('string');
     });
 
     it('upsert drops a record with an unknown form value, without an error', async () => {
