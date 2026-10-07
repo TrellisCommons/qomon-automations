@@ -1,0 +1,29 @@
+# PR gate for the shared-memory system (docs/README.md): code in a mapped
+# area (docs/doc-map.tsv) must not change without its docs. Apply the
+# docs-not-needed label when a change genuinely has no doc impact.
+name: Doc Sync
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+permissions:
+  contents: read
+jobs:
+  check:
+    if: "!contains(github.event.pull_request.labels.*.name, 'docs-not-needed')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check mapped code changes carry doc updates
+        env:
+          BASE: ${{ github.base_ref }}
+        run: |
+          if out=$(scripts/check-doc-sync.sh "origin/$BASE"); then
+            echo "Doc sync OK."
+          else
+            echo "$out"
+            echo
+            echo "Docs are this repo's shared memory (docs/README.md). Update the listed doc(s) in this PR (the doc-sync skill gives a guided path), or apply the docs-not-needed label if this change genuinely has no doc impact."
+            exit 1
+          fi

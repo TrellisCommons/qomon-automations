@@ -41,24 +41,13 @@ A write to Qomon changes a live campaign's data. All writes are off unless `QOMO
 
 Canadian spelling, Oxford comma, no em dashes, no horizontal rule directly above a header, text formats only.
 
-## Commands
+<!-- BEGIN:turborepo-agent-rules -->
 
-```bash
-pnpm install
-pnpm check                          # lint, typecheck, test (turbo)
-pnpm format                         # prettier
-scripts/check-doc-sync.sh [<base>]  # did mapped code change without its docs?
-scripts/check-doc-freshness.sh      # list overdue memory-doc reviews
-```
+# This is NOT the Turborepo you know
 
-Tests need Postgres at `DATABASE_URL`; the test setup runs `prisma migrate deploy` first. CI uses a Postgres 17 service container.
+Turborepo configuration, task behavior, and CLI commands can vary between installed versions and may differ from your training data. Resolve the `turbo` package from this file's directory or relevant workspace; in monorepos, it may not be visible from the repository root. For example, run `node -p "require.resolve('turbo/package.json')"` from a workspace that depends on `turbo`.
 
-## Cloud sessions
+Read `docs/README.md` inside that installed package first, then read the relevant pages from its `docs/` directory before changing Turborepo configuration or commands. Heed deprecation notices. These bundled docs match the installed package version and are available without network access.
 
-- Docker does not work. Never run `docker` or `docker compose`; Docker builds are verified in CI or on a laptop.
-- The image's Postgres 16 cluster is the test database. A SessionStart hook (`.claude/hooks/start-postgres.sh`) starts it.
-- The environment's Setup Script is versioned in `claude/cloud-environment-setup.sh`. It logs failed steps to `~/.cloud-setup-errors.log`; check that file at session start.
-
-## Docs are shared memory
-
-`docs/README.md` describes the system. Before working in an area, read the docs `docs/doc-map.tsv` maps to it. After changing behaviour in a mapped area, update its docs in the same PR (the **doc-sync** skill); the Doc Sync check enforces it, and the `docs-not-needed` label overrides it. Overdue docs get the **doc-review** skill.
+This block is written and re-added by `turbo` before repository-scoped commands when an AI agent is detected. In the Turborepo source repository, its template is defined in `crates/turborepo-cli/src/cli/agent_guidance.rs`. Removing the managed block while updates are enabled means a later qualifying invocation will add it again. Set `"agentGuidance": false` in the root `turbo.json` or `turbo.jsonc` to opt out; this does not remove an existing block. Keep the block committed with your work to avoid an uncommitted change on the next agent invocation.
+<!-- END:turborepo-agent-rules -->

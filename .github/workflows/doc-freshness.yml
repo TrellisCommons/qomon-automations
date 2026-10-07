@@ -1,0 +1,45 @@
+# Weekly check that the memory docs (docs/README.md) are within their review
+# schedule. When any doc is overdue it opens, or updates, a single issue
+# labelled doc-review listing what needs a pass with the doc-review skill.
+name: Doc Freshness
+on:
+  schedule:
+    - cron: '0 13 * * 1' # Mondays 13:00 UTC (morning in Ontario)
+  workflow_dispatch:
+permissions:
+  contents: read
+  issues: write
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check doc freshness
+        id: check
+        run: |
+          if out=$(bash scripts/check-doc-freshness.sh); then
+            echo "All memory docs are within their review schedule."
+          else
+            echo "$out"
+            {
+              echo 'stale<<STALE_EOF'
+              echo "$out"
+              echo 'STALE_EOF'
+            } >> "$GITHUB_OUTPUT"
+          fi
+      - name: Open or update the doc-review issue
+        if: steps.check.outputs.stale != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STALE: ${{ steps.check.outputs.stale }}
+        run: |
+          gh label create doc-review \
+            --description "Scheduled memory-doc reviews that are overdue" \
+            --color BFD4F2 --force
+          body=$(printf 'These memory docs are past their scheduled review (see docs/README.md for the system):\n\n```\n%s\n```\n\nTo clear one: open a Claude session on this repo and run the doc-review skill for the doc, or review it by hand and bump its `last-reviewed` frontmatter.\n\nThis issue is refreshed weekly by the Doc Freshness workflow and can be closed once the listed docs are reviewed.' "$STALE")
+          num=$(gh issue list --state open --label doc-review --json number --jq '.[0].number // empty')
+          if [ -n "$num" ]; then
+            gh issue edit "$num" --body "$body"
+          else
+            gh issue create --title "Overdue memory-doc reviews" --label doc-review --body "$body"
+          fi
