@@ -49,6 +49,12 @@ importers:
         specifier: ^4.19.2
         version: 4.23.15
 
+  packages/qomon-client:
+    dependencies:
+      zod:
+        specifier: ^3.24.1
+        version: 3.25.76
+
 packages:
 
   '@esbuild/aix-ppc64@0.28.2':
