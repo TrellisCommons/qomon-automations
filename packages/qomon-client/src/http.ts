@@ -93,7 +93,8 @@ export class QomonHttp {
                   ? { 'Content-Type': 'application/json' }
                   : {}),
               },
-              body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+              body:
+                opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
               signal: controller.signal,
             });
           } catch (cause) {
@@ -109,7 +110,9 @@ export class QomonHttp {
 
           if (!res.ok) {
             if (res.status === 429) {
-              const retryAfter = parseRetryAfter(res.headers.get('retry-after'));
+              const retryAfter = parseRetryAfter(
+                res.headers.get('retry-after'),
+              );
               this.limiter.penalize(retryAfter ?? 5_000);
               throw new QomonRateLimitError(
                 'Qomon rate limited',

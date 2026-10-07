@@ -11,7 +11,10 @@ import {
   QomonNotFoundError,
   QomonValidationError,
 } from './errors.js';
-import { syncedFieldsToQomon, type QomonSyncedFields } from './transaction-extra-fields.js';
+import {
+  syncedFieldsToQomon,
+  type QomonSyncedFields,
+} from './transaction-extra-fields.js';
 import { mergeContact } from './contact-write.js';
 import type {
   QomonBundle,
@@ -132,7 +135,13 @@ export class InMemoryQomon implements QomonApi {
     } as unknown as QomonBundle;
     this.bundles.set(id, full);
     this.history.set(id, [
-      { transaction_bundle_id: id, kind: 'transaction', old: null, new: { id }, CreatedAt: now },
+      {
+        transaction_bundle_id: id,
+        kind: 'transaction',
+        old: null,
+        new: { id },
+        CreatedAt: now,
+      },
     ]);
     return structuredClone(full);
   }
@@ -151,8 +160,7 @@ export class InMemoryQomon implements QomonApi {
     const limit = Math.min(1000, params.limit ?? 100);
     const offset = params.offset ?? 0;
     const all = [...this.bundles.values()].sort(
-      (a, b) =>
-        Date.parse(b.CreatedAt ?? '') - Date.parse(a.CreatedAt ?? ''),
+      (a, b) => Date.parse(b.CreatedAt ?? '') - Date.parse(a.CreatedAt ?? ''),
     );
     return {
       data: all.slice(offset, offset + limit).map((b) => structuredClone(b)),
@@ -174,7 +182,9 @@ export class InMemoryQomon implements QomonApi {
     return structuredClone(b);
   }
 
-  async createTransactionBundle(input: CreateBundleInput): Promise<QomonBundle> {
+  async createTransactionBundle(
+    input: CreateBundleInput,
+  ): Promise<QomonBundle> {
     this.tick();
     if (!input.transactions || input.transactions.length === 0) {
       throw new QomonValidationError('at least one transaction required', {
@@ -214,7 +224,10 @@ export class InMemoryQomon implements QomonApi {
             httpStatus: 422,
           });
         }
-        b.transactions[idx] = { ...b.transactions[idx]!, ...t } as QomonTransaction;
+        b.transactions[idx] = {
+          ...b.transactions[idx]!,
+          ...t,
+        } as QomonTransaction;
       } else {
         b.transactions.push({
           ...t,
@@ -266,14 +279,20 @@ export class InMemoryQomon implements QomonApi {
     core: TransactionCoreFields,
   ): Promise<QomonBundle> {
     const current = await this.getTransactionBundle(bundleId);
-    const currentExtraJson = current.transactions.find((t) => t.id === transactionId)?.extra_json;
+    const currentExtraJson = current.transactions.find(
+      (t) => t.id === transactionId,
+    )?.extra_json;
     const mergedExtraJson = {
-      ...(typeof currentExtraJson === 'object' && currentExtraJson !== null ? currentExtraJson : {}),
+      ...(typeof currentExtraJson === 'object' && currentExtraJson !== null
+        ? currentExtraJson
+        : {}),
       ...syncedFieldsToQomon(syncedFields),
     };
     return this.patchTransactionBundle({
       id: bundleId,
-      transactions: [{ id: transactionId, ...core, extra_json: mergedExtraJson }],
+      transactions: [
+        { id: transactionId, ...core, extra_json: mergedExtraJson },
+      ],
     });
   }
 
@@ -291,7 +310,10 @@ export class InMemoryQomon implements QomonApi {
     return { id: created.id! };
   }
 
-  async replaceContact(id: number, contact: QomonContact): Promise<QomonContact> {
+  async replaceContact(
+    id: number,
+    contact: QomonContact,
+  ): Promise<QomonContact> {
     this.tick();
     if (!this.contacts.has(id)) {
       throw new QomonNotFoundError('contact not found', {
@@ -307,7 +329,10 @@ export class InMemoryQomon implements QomonApi {
     return structuredClone(replaced);
   }
 
-  async updateContact(id: number, changes: Partial<QomonContact>): Promise<QomonContact> {
+  async updateContact(
+    id: number,
+    changes: Partial<QomonContact>,
+  ): Promise<QomonContact> {
     const current = await this.getContact(id);
     await this.replaceContact(id, mergeContact(current, changes, id));
     return this.getContact(id);

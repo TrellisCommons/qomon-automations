@@ -7,7 +7,9 @@ const sandbox = process.env.QOMON_SANDBOX === '1';
 export default defineConfig({
   test: {
     include: ['src/**/*.test.ts'],
-    exclude: sandbox ? ['node_modules/**'] : ['src/sandbox.test.ts', 'node_modules/**'],
+    exclude: sandbox
+      ? ['node_modules/**']
+      : ['src/sandbox.test.ts', 'node_modules/**'],
     environment: 'node',
   },
 });

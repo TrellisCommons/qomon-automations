@@ -128,9 +128,7 @@ export const QomonTransactionStatus = z
   .passthrough();
 export type QomonTransactionStatus = z.infer<typeof QomonTransactionStatus>;
 
-export const QomonCodeCampaign = z
-  .object({ code: z.string() })
-  .passthrough();
+export const QomonCodeCampaign = z.object({ code: z.string() }).passthrough();
 export type QomonCodeCampaign = z.infer<typeof QomonCodeCampaign>;
 
 export const QomonTransactionSettings = z

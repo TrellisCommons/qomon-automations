@@ -8,10 +8,15 @@ export interface BackoffOptions {
   jitter?: number;
   sleep?: (ms: number) => Promise<void>;
   random?: () => number;
-  onRetry?: (info: { attempt: number; delayMs: number; error: unknown }) => void;
+  onRetry?: (info: {
+    attempt: number;
+    delayMs: number;
+    error: unknown;
+  }) => void;
 }
 
-const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+const defaultSleep = (ms: number) =>
+  new Promise<void>((r) => setTimeout(r, ms));
 
 function isRetryable(error: unknown): boolean {
   if (error instanceof QomonError) return error.retryable;

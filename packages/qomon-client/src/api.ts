@@ -52,7 +52,9 @@ export interface TransactionCoreFields {
  * suite runs against either.
  */
 export interface QomonApi {
-  listTransactionBundles(params?: ListBundlesParams): Promise<ListPage<QomonBundle>>;
+  listTransactionBundles(
+    params?: ListBundlesParams,
+  ): Promise<ListPage<QomonBundle>>;
   getTransactionBundle(id: number): Promise<QomonBundle>;
   createTransactionBundle(input: CreateBundleInput): Promise<QomonBundle>;
   patchTransactionBundle(patch: BundlePatch): Promise<QomonBundle>;
@@ -88,6 +90,9 @@ export interface QomonApi {
    *  `changes` onto it (the address field by field), writes the whole object
    *  back (PATCH is a full replace), and returns the record as re-read
    *  after the write. */
-  updateContact(id: number, changes: Partial<QomonContact>): Promise<QomonContact>;
+  updateContact(
+    id: number,
+    changes: Partial<QomonContact>,
+  ): Promise<QomonContact>;
   getContact(id: number): Promise<QomonContact>;
 }

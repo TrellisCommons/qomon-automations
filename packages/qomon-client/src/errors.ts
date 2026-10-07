@@ -95,7 +95,10 @@ export function classifyHttpError(
     return new QomonRateLimitError(`Qomon rate limited: ${detail}`, ctx, null);
   }
   if (httpStatus === 400 || httpStatus === 422) {
-    return new QomonValidationError(`Qomon rejected the request: ${detail}`, ctx);
+    return new QomonValidationError(
+      `Qomon rejected the request: ${detail}`,
+      ctx,
+    );
   }
   if (httpStatus >= 500) {
     return new QomonServerError(`Qomon server error: ${detail}`, ctx);

@@ -15,7 +15,8 @@ export interface RateLimiterOptions {
   sleep?: (ms: number) => Promise<void>;
 }
 
-const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+const defaultSleep = (ms: number) =>
+  new Promise<void>((r) => setTimeout(r, ms));
 
 export class RateLimiter {
   private readonly minSpacingMs: number;

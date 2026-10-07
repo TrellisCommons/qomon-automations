@@ -13,7 +13,9 @@ runQomonContractSuite('in-memory fake', async () => {
         mail: 'dana@example.org',
       });
       const bundle = api.seedBundle({
-        transactions: [{ amount: 25_000, currency: 'cad', contact_id: contact.id }],
+        transactions: [
+          { amount: 25_000, currency: 'cad', contact_id: contact.id },
+        ],
       });
       return {
         bundleId: bundle.id,

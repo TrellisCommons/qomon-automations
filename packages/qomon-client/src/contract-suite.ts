@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 import type { QomonApi } from './api.js';
 import { collectBundles, paginateBundles } from './pagination.js';
 import { QomonPollChangeFeed } from './ingestion-source.js';
-import { qomonToSyncedFields, type QomonSyncedFields } from './transaction-extra-fields.js';
+import {
+  qomonToSyncedFields,
+  type QomonSyncedFields,
+} from './transaction-extra-fields.js';
 
 /**
  * The Qomon contract. Runs against the in-memory fake in CI (no network) and
@@ -13,7 +16,11 @@ import { qomonToSyncedFields, type QomonSyncedFields } from './transaction-extra
 export interface ContractHarness {
   api: QomonApi;
   /** create a bundle with one transaction; return its ids. */
-  makeBundle(): Promise<{ bundleId: number; transactionId: number; contactId: number }>;
+  makeBundle(): Promise<{
+    bundleId: number;
+    transactionId: number;
+    contactId: number;
+  }>;
   /** whether metadata round-trips (false on the sandbox until Qomon ships A1). */
   metadataSupported: boolean;
 }
@@ -36,7 +43,8 @@ export function runQomonContractSuite(
       await h.makeBundle();
       await h.makeBundle();
       const ids = new Set<number>();
-      for await (const b of paginateBundles(h.api, { pageSize: 1 })) ids.add(b.id);
+      for await (const b of paginateBundles(h.api, { pageSize: 1 }))
+        ids.add(b.id);
       const all = await collectBundles(h.api, { pageSize: 1000 });
       expect(ids.size).toBe(all.length);
     });
@@ -99,13 +107,18 @@ export function runQomonContractSuite(
         processed_date: null,
         source_code: 'contract:test',
       };
-      await h.api.writeTransactionMetadata(bundleId, transactionId, syncedFields, {
-        amount: existing.amount,
-        currency: existing.currency,
-        contact_id: existing.contact_id,
-        date: existing.date,
-        payment_method_kind: existing.payment_method_kind ?? undefined,
-      });
+      await h.api.writeTransactionMetadata(
+        bundleId,
+        transactionId,
+        syncedFields,
+        {
+          amount: existing.amount,
+          currency: existing.currency,
+          contact_id: existing.contact_id,
+          date: existing.date,
+          payment_method_kind: existing.payment_method_kind ?? undefined,
+        },
+      );
       const after = await h.api.getTransactionBundle(bundleId);
       const tx = after.transactions.find((t) => t.id === transactionId);
       expect(qomonToSyncedFields(tx?.extra_json)).toEqual(syncedFields);

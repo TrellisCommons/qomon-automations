@@ -48,14 +48,20 @@ const GOODS_SERVICES = 'Contribution Type';
 const ENTITY_KIND = 'Political Entity Type';
 const RIDING_NUMBER = 'Electoral District (Riding) Number';
 
-const ENTITY_KIND_TO_QOMON: Record<GpoMetadataDescriptive['entity_kind'], string> = {
+const ENTITY_KIND_TO_QOMON: Record<
+  GpoMetadataDescriptive['entity_kind'],
+  string
+> = {
   PARTY: 'Party',
   CA: 'Association',
   CAMPAIGN: 'Candidate',
   LEADERSHIP: 'Leadership Contestant',
 };
 
-const ENTITY_KIND_FROM_QOMON: Record<string, GpoMetadataDescriptive['entity_kind']> = {
+const ENTITY_KIND_FROM_QOMON: Record<
+  string,
+  GpoMetadataDescriptive['entity_kind']
+> = {
   Party: 'PARTY',
   Association: 'CA',
   Candidate: 'CAMPAIGN',
@@ -65,7 +71,12 @@ const ENTITY_KIND_FROM_QOMON: Record<string, GpoMetadataDescriptive['entity_kind
 /** The subset of GpoMetadataDescriptive that actually lives in Qomon. */
 export type QomonSyncedFields = Pick<
   GpoMetadataDescriptive,
-  'period_id' | 'riding_number' | 'entity_kind' | 'goods_services' | 'processed_date' | 'source_code'
+  | 'period_id'
+  | 'riding_number'
+  | 'entity_kind'
+  | 'goods_services'
+  | 'processed_date'
+  | 'source_code'
 >;
 
 export const QOMON_SYNCED_FIELD_KEYS: readonly (keyof QomonSyncedFields)[] = [
@@ -80,7 +91,9 @@ export const QOMON_SYNCED_FIELD_KEYS: readonly (keyof QomonSyncedFields)[] = [
 /** Translate this tool's synced fields into Qomon's flat, label-keyed shape.
  *  Merge the result onto the transaction's EXISTING extra_json before
  *  PATCHing (see the module doc) — never send this object alone. */
-export function syncedFieldsToQomon(d: QomonSyncedFields): Record<string, unknown> {
+export function syncedFieldsToQomon(
+  d: QomonSyncedFields,
+): Record<string, unknown> {
   return {
     [SOURCE_CODE]: d.source_code,
     [PROCESSED_DATE]: d.processed_date,
@@ -90,7 +103,8 @@ export function syncedFieldsToQomon(d: QomonSyncedFields): Record<string, unknow
     // riding_number is null for party-level contributions; representation of
     // "no riding" unconfirmed against the live API, null is the best guess
     // for a number-typed field.
-    [RIDING_NUMBER]: d.riding_number != null ? String(d.riding_number).padStart(3, '0') : null,
+    [RIDING_NUMBER]:
+      d.riding_number != null ? String(d.riding_number).padStart(3, '0') : null,
   };
 }
 
@@ -108,7 +122,9 @@ export function qomonToSyncedFields(raw: unknown): QomonSyncedFields | null {
 
   const processedDateRaw = obj[PROCESSED_DATE];
   const processedDate: string | null =
-    processedDateRaw == null || processedDateRaw === '' ? null : (processedDateRaw as never);
+    processedDateRaw == null || processedDateRaw === ''
+      ? null
+      : (processedDateRaw as never);
   if (processedDate !== null && typeof processedDate !== 'string') return null;
 
   const periodId = toInt(obj[PERIOD_ID]);
@@ -116,12 +132,18 @@ export function qomonToSyncedFields(raw: unknown): QomonSyncedFields | null {
 
   const goodsServicesRaw = obj[GOODS_SERVICES];
   const goodsServices =
-    goodsServicesRaw === 'In Kind' ? true : goodsServicesRaw === 'Monetary' ? false : undefined;
+    goodsServicesRaw === 'In Kind'
+      ? true
+      : goodsServicesRaw === 'Monetary'
+        ? false
+        : undefined;
   if (goodsServices === undefined) return null;
 
   const entityKindRaw = obj[ENTITY_KIND];
   const entityKind =
-    typeof entityKindRaw === 'string' ? ENTITY_KIND_FROM_QOMON[entityKindRaw] : undefined;
+    typeof entityKindRaw === 'string'
+      ? ENTITY_KIND_FROM_QOMON[entityKindRaw]
+      : undefined;
   if (!entityKind) return null;
 
   const ridingRaw = obj[RIDING_NUMBER];
@@ -145,11 +167,15 @@ export function qomonToSyncedFields(raw: unknown): QomonSyncedFields | null {
 }
 
 function toInt(raw: unknown): number | undefined {
-  const n = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : NaN;
+  const n =
+    typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : NaN;
   return Number.isInteger(n) ? n : undefined;
 }
 
 /** True when the synced-field subset of two descriptive objects differ. */
-export function syncedFieldsChanged(a: QomonSyncedFields, b: QomonSyncedFields): boolean {
+export function syncedFieldsChanged(
+  a: QomonSyncedFields,
+  b: QomonSyncedFields,
+): boolean {
   return QOMON_SYNCED_FIELD_KEYS.some((k) => a[k] !== b[k]);
 }

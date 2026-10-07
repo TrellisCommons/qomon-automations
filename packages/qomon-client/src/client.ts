@@ -9,7 +9,10 @@ import type {
 } from './api.js';
 import { GuardedContactWriter } from './contact-write.js';
 import { QomonHttp, type QomonHttpOptions } from './http.js';
-import { syncedFieldsToQomon, type QomonSyncedFields } from './transaction-extra-fields.js';
+import {
+  syncedFieldsToQomon,
+  type QomonSyncedFields,
+} from './transaction-extra-fields.js';
 import {
   QomonBundle,
   QomonCodeCampaign,
@@ -85,7 +88,9 @@ export class QomonClient implements QomonApi {
     return res.data;
   }
 
-  async createTransactionBundle(input: CreateBundleInput): Promise<QomonBundle> {
+  async createTransactionBundle(
+    input: CreateBundleInput,
+  ): Promise<QomonBundle> {
     const res = await this.http.request({
       method: 'POST',
       path: '/v1/transaction_bundles',
@@ -110,7 +115,9 @@ export class QomonClient implements QomonApi {
       method: 'GET',
       path: `/v1/transaction_bundles/${id}/history`,
       // the spec declares `data` as an object where a list is expected; accept both
-      schema: z.array(QomonHistoryEntry).or(QomonHistoryEntry.transform((e) => [e])),
+      schema: z
+        .array(QomonHistoryEntry)
+        .or(QomonHistoryEntry.transform((e) => [e])),
     });
     return res.data;
   }
@@ -149,14 +156,20 @@ export class QomonClient implements QomonApi {
     core: TransactionCoreFields,
   ): Promise<QomonBundle> {
     const current = await this.getTransactionBundle(bundleId);
-    const currentExtraJson = current.transactions.find((t) => t.id === transactionId)?.extra_json;
+    const currentExtraJson = current.transactions.find(
+      (t) => t.id === transactionId,
+    )?.extra_json;
     const mergedExtraJson = {
-      ...(typeof currentExtraJson === 'object' && currentExtraJson !== null ? currentExtraJson : {}),
+      ...(typeof currentExtraJson === 'object' && currentExtraJson !== null
+        ? currentExtraJson
+        : {}),
       ...syncedFieldsToQomon(syncedFields),
     };
     await this.patchTransactionBundle({
       id: bundleId,
-      transactions: [{ id: transactionId, ...core, extra_json: mergedExtraJson }],
+      transactions: [
+        { id: transactionId, ...core, extra_json: mergedExtraJson },
+      ],
     });
     // Qomon's PATCH response is a reduced transaction representation that
     // never carries extra_json, regardless of whether the write succeeded

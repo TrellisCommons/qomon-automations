@@ -6,7 +6,11 @@ import {
   QomonRateLimitError,
   QomonServerError,
 } from './errors.js';
-import { GuardedContactWriter, IncompleteContactError, mergeContact } from './contact-write.js';
+import {
+  GuardedContactWriter,
+  IncompleteContactError,
+  mergeContact,
+} from './contact-write.js';
 
 describe('RateLimiter', () => {
   it('spaces calls to the configured rps', async () => {
@@ -52,7 +56,11 @@ describe('withBackoff', () => {
       async () => {
         calls += 1;
         if (calls < 3) {
-          throw new QomonServerError('boom', { method: 'GET', path: '/x', attempt: calls });
+          throw new QomonServerError('boom', {
+            method: 'GET',
+            path: '/x',
+            attempt: calls,
+          });
         }
         return 'ok';
       },
@@ -70,7 +78,11 @@ describe('withBackoff', () => {
       withBackoff(
         async () => {
           calls += 1;
-          throw new QomonAuthError('nope', { method: 'GET', path: '/x', attempt: calls });
+          throw new QomonAuthError('nope', {
+            method: 'GET',
+            path: '/x',
+            attempt: calls,
+          });
         },
         { retries: 5, baseMs: 10, maxMs: 100, sleep },
       ),
@@ -109,23 +121,31 @@ describe('withBackoff', () => {
 
 describe('GuardedContactWriter', () => {
   const transport = {
-    createContact: vi.fn(async (c: Record<string, unknown>) => ({ ...c, id: 42 })),
-    replaceContact: vi.fn(async (id: number, c: Record<string, unknown>) => ({ ...c, id })),
+    createContact: vi.fn(async (c: Record<string, unknown>) => ({
+      ...c,
+      id: 42,
+    })),
+    replaceContact: vi.fn(async (id: number, c: Record<string, unknown>) => ({
+      ...c,
+      id,
+    })),
     getContact: vi.fn(async (id: number) => ({ id })),
   };
 
   it('creates via the synchronous path and returns the id', async () => {
     const w = new GuardedContactWriter(transport);
-    await expect(w.createContact({ firstname: 'A', surname: 'B' })).resolves.toEqual({
+    await expect(
+      w.createContact({ firstname: 'A', surname: 'B' }),
+    ).resolves.toEqual({
       id: 42,
     });
   });
 
   it('refuses a replace that is not field-complete', async () => {
     const w = new GuardedContactWriter(transport);
-    await expect(w.replaceContact(1, { firstname: 'A' })).rejects.toBeInstanceOf(
-      IncompleteContactError,
-    );
+    await expect(
+      w.replaceContact(1, { firstname: 'A' }),
+    ).rejects.toBeInstanceOf(IncompleteContactError);
   });
 
   it('allows a field-complete replace', async () => {
@@ -142,7 +162,16 @@ describe('GuardedContactWriter', () => {
 
   it('updates by writing back the whole current record with the changes merged in', async () => {
     const store = new Map<number, Record<string, unknown>>([
-      [7, { id: 7, firstname: 'Ada', surname: 'Lovelace', phone: '555', address: { street: 'Old St', city: 'Guelph', lat: 1 } }],
+      [
+        7,
+        {
+          id: 7,
+          firstname: 'Ada',
+          surname: 'Lovelace',
+          phone: '555',
+          address: { street: 'Old St', city: 'Guelph', lat: 1 },
+        },
+      ],
     ]);
     const w = new GuardedContactWriter({
       createContact: async (c) => c,
@@ -153,7 +182,10 @@ describe('GuardedContactWriter', () => {
       getContact: async (id) => structuredClone(store.get(id)!),
     });
     // no email on file: a plain replace would refuse this contact
-    const updated = await w.updateContact(7, { surname: 'King', address: { street: 'New St' } });
+    const updated = await w.updateContact(7, {
+      surname: 'King',
+      address: { street: 'New St' },
+    });
     expect(updated).toEqual({
       id: 7,
       firstname: 'Ada',
@@ -166,7 +198,13 @@ describe('GuardedContactWriter', () => {
 
 describe('mergeContact', () => {
   it('leaves the address alone when the changes do not name it, and never takes an id from the changes', () => {
-    expect(mergeContact({ id: 1, firstname: 'A', address: { city: 'X' } }, { id: 99, firstname: 'B' }, 1)).toEqual({
+    expect(
+      mergeContact(
+        { id: 1, firstname: 'A', address: { city: 'X' } },
+        { id: 99, firstname: 'B' },
+        1,
+      ),
+    ).toEqual({
       id: 1,
       firstname: 'B',
       address: { city: 'X' },

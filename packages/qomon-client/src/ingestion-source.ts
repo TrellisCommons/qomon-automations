@@ -35,7 +35,10 @@ export interface ChangeBatch {
 
 export interface ChangeFeedSource {
   readonly kind: string;
-  pull(cursor: ChangeCursor | null, opts?: { limit?: number }): Promise<ChangeBatch>;
+  pull(
+    cursor: ChangeCursor | null,
+    opts?: { limit?: number },
+  ): Promise<ChangeBatch>;
 }
 
 function bundleChangedAt(b: QomonBundle): string {
