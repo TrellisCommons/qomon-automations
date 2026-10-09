@@ -1,0 +1,26 @@
+{
+  "name": "@trellis/address-match-core",
+  "version": "0.0.0",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src",
+    "test": "vitest run",
+    "parity:generate": "python3 -I reference/generate_parity.py > src/parity-fixture.json"
+  },
+  "devDependencies": {
+    "fast-check": "^3.23.2"
+  }
+}
