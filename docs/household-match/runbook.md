@@ -56,8 +56,20 @@ The first run catches up on every address knocked so far. Do it by hand, before 
    job household-match --space <space-key> --backfill --apply --max-writes <planned + 10%>
    ```
 
-   It writes in batches of 20 and verifies each by reading it back. Each write is a read, the upsert, and at least one read back, so at the client's 5 requests per second expect 1 to 2 writes per second: about 10 to 15 minutes per 1,000. If more than `MAX_FAILED_SHARE` of writes fail, it stops and turns the space's writes off. Over `--max-writes` it writes nothing and exits 2; dry-run again.
-5. Re-running is safe: each run plans only what is still missing.
+   It posts its size and rough duration to Slack, then writes in batches of 20 and verifies each by reading it back. Each write is a read, the upsert, and at least one read back, so at `QOMON_RPS=5` expect 1 to 2 writes per second, about 10 to 15 minutes per 1,000. `QOMON_RPS=8` (Qomon refills at 10 per second) brings that to about 7 minutes. If more than `MAX_FAILED_SHARE` of writes fail, it stops and turns the space's writes off. Over `--max-writes` it writes nothing and exits 2; dry-run again.
+5. **Watch it** from another shell; progress is saved after every batch:
+
+   ```bash
+   job status --space <space-key>
+   ```
+
+## Stopping and restarting
+
+Any run can be stopped and run again; the next run fetches afresh and plans only what is still missing.
+
+- **Ctrl-C or `systemctl stop`** (SIGINT or SIGTERM): the run finishes the write in hand, verifies what it already sent, and exits 3 (`INTERRUPTED`). A second Ctrl-C exits at once.
+- **Killed outright** (lost connection, `kill -9`, reboot): the run stays `RUNNING`. The next run settles it first: it reads back that run's unverified writes, records what Qomon has, and marks it `INTERRUPTED`.
+- **To restart a backfill**, run the same apply command again. Its plan is smaller by what already landed, so the same `--max-writes` still fits.
 
 ## Hourly
 
@@ -78,6 +90,7 @@ Each run posts to Slack only when it applied writes, a write failed, or the run 
 | 0 | done, nothing to do, the space is past `activeUntil`, or another run held the lock |
 | 1 | the run failed (Slack has the error) |
 | 2 | a circuit breaker tripped; for an hourly run the space's writes are now off |
+| 3 | interrupted by a signal; safe to run again |
 | 64 | bad command line |
 
 ## When a breaker trips

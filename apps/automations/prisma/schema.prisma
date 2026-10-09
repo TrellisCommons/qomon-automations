@@ -51,6 +51,8 @@ enum RunStatus {
   /// a circuit breaker stopped the run
   TRIPPED
   FAILED
+  /// stopped by a signal, or abandoned and settled by a later run
+  INTERRUPTED
 }
 
 model JobRun {
@@ -63,7 +65,8 @@ model JobRun {
   status     RunStatus  @default(RUNNING)
   startedAt  DateTime   @default(now())
   finishedAt DateTime?
-  /// counts only (fetched, planned, applied, verified, failed, ...)
+  /// counts only (fetched, planned, applied, verified, failed, ...), and
+  /// `progress` while applying; saved after every batch
   stats      Json?
   error      String?
 

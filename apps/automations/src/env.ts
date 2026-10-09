@@ -11,6 +11,9 @@ const EnvSchema = z.object({
     .default('development'),
   DATABASE_URL: z.string().url(),
   QOMON_API_BASE: z.string().url().default('https://incoming.qomon.app'),
+  /** Requests per second to Qomon. Its limit is a burst of 100 refilling at
+   *  10 per second (as of 2026-10), so stay under 10. */
+  QOMON_RPS: z.coerce.number().positive().max(9).default(5),
   /** The hard stop on Qomon writes. Set to `true` on the droplet only, so a
    *  database copied from production cannot write from anywhere else. */
   QOMON_WRITES_ALLOWED: booleanFlag,

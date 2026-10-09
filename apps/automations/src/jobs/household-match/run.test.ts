@@ -4,6 +4,7 @@ import { pino } from 'pino';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Env } from '../../env.js';
 import { tryAdvisoryLock } from '../../lock.js';
+import { runStatus } from '../../report.js';
 import { makeSpace, resetDb, testEnv, testPrisma } from '../../test/db.js';
 import {
   runHouseholdMatch,
@@ -340,6 +341,130 @@ describe('household match run', () => {
       await runHouseholdMatch(deps({ lock: async () => null }), hourly),
     ).toEqual({ status: 'locked' });
     expect(await prisma.jobRun.count()).toBe(0);
+  });
+});
+
+describe('progress and restarts', () => {
+  it('saves progress on the run, and status shows it', async () => {
+    await makeSpace(prisma);
+    const result = await runHouseholdMatch(deps(), hourly);
+    const run = await prisma.jobRun.findUniqueOrThrow({
+      where: { id: 'runId' in result ? result.runId : '' },
+    });
+    expect(run.stats).toMatchObject({ progress: { done: 2, total: 2 } });
+    expect(await runStatus(prisma, 'test-space')).toMatch(
+      /progress 2\/2 \(100%\)/,
+    );
+  });
+
+  it('a backfill announces its size and rough duration', async () => {
+    await makeSpace(prisma);
+    const d = deps();
+    await runHouseholdMatch(d, { ...hourly, backfill: true, maxWrites: 10 });
+    expect(d.notify.mock.calls[0]![0]).toMatch(
+      /backfill on space `test-space` started: 2 writes, about 1 min/,
+    );
+  });
+
+  it('stops cleanly on a signal: verifies what was sent, and the next run does the rest', async () => {
+    await makeSpace(prisma);
+    const stop = new AbortController();
+    const api: QomonApi = Object.create(qomon, {
+      upsertContact: {
+        value: async (c: Parameters<QomonApi['upsertContact']>[0]) => {
+          await qomon.upsertContact(c);
+          stop.abort();
+        },
+      },
+    });
+    const first = await runHouseholdMatch(
+      deps({ api, signal: stop.signal }),
+      hourly,
+    );
+    expect(first).toMatchObject({
+      status: 'INTERRUPTED',
+      stats: { applied: 1, verified: 1 },
+    });
+    expect(
+      await prisma.plannedWrite.count({ where: { status: 'APPLYING' } }),
+    ).toBe(0);
+    expect(
+      await prisma.plannedWrite.findFirst({ where: { status: 'SKIPPED' } }),
+    ).toMatchObject({
+      detail: 'run interrupted before this write',
+    });
+
+    const second = await runHouseholdMatch(deps(), hourly);
+    expect(second).toMatchObject({
+      status: 'SUCCEEDED',
+      stats: { planned: 1, verified: 1 },
+    });
+    expect(presenceValue(await qomon.getContact(ids.housemate))).toBe(
+      'Absent (household)',
+    );
+    expect(presenceValue(await qomon.getContact(ids.roommate))).toBe(
+      'Absent (household)',
+    );
+  });
+
+  it('settles a run that was killed outright before planning again', async () => {
+    const space = await makeSpace(prisma);
+    // a killed run: one write landed but was never read back, one was sent
+    // and dropped, one never attempted
+    qomon.seedContact({
+      ...(await qomon.getContact(ids.roommate)),
+      formdatas: presence('Absent (household)'),
+    });
+    const dead = await prisma.jobRun.create({
+      data: {
+        job: 'household-match',
+        spaceKey: space.key,
+        kind: 'BACKFILL',
+        applying: true,
+      },
+    });
+    const write = (
+      contactId: number,
+      status: 'APPLYING' | 'APPLIED' | 'PLANNED',
+    ) => ({
+      runId: dead.id,
+      contactId,
+      field: 'presence',
+      valueAfter: 'Absent (household)',
+      triggerContactId: ids.knocked,
+      reason: 'test',
+      status,
+    });
+    await prisma.plannedWrite.createMany({
+      data: [
+        write(ids.roommate, 'APPLYING'),
+        write(ids.housemate, 'APPLIED'),
+        write(ids.neighbour, 'PLANNED'),
+      ],
+    });
+
+    const result = await runHouseholdMatch(deps(), hourly);
+    expect(result).toMatchObject({
+      status: 'SUCCEEDED',
+      stats: { reconciled: 2, planned: 1, verified: 1 },
+    });
+    expect(
+      await prisma.jobRun.findUniqueOrThrow({ where: { id: dead.id } }),
+    ).toMatchObject({
+      status: 'INTERRUPTED',
+      error: expect.stringMatching(/^abandoned; settled by run /),
+    });
+    const settled = await prisma.plannedWrite.findMany({
+      where: { runId: dead.id },
+      orderBy: { contactId: 'asc' },
+    });
+    expect(
+      Object.fromEntries(settled.map((w) => [w.contactId, w.status])),
+    ).toEqual({
+      [ids.roommate]: 'VERIFIED',
+      [ids.housemate]: 'FAILED',
+      [ids.neighbour]: 'SKIPPED',
+    });
   });
 });
 

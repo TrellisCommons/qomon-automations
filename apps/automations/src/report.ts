@@ -52,3 +52,55 @@ export async function writeRunReport(
   await writeFile(path, rows.join('\n') + '\n', { mode: 0o600 });
   return writes.length;
 }
+
+interface StoredStats {
+  planned?: number;
+  applied?: number;
+  verified?: number;
+  failed?: number;
+  skipped?: number;
+  progress?: {
+    done: number;
+    total: number;
+    perMinute: number;
+    etaSeconds: number | null;
+    updatedAt: string;
+  };
+}
+
+/** Recent runs of a space, newest first, as text. A running run shows its
+ *  last saved progress (saved after every batch of writes). */
+export async function runStatus(
+  prisma: PrismaClient,
+  spaceKey: string,
+  runId?: string,
+): Promise<string> {
+  const runs = await prisma.jobRun.findMany({
+    where: { spaceKey, ...(runId ? { id: runId } : {}) },
+    orderBy: { startedAt: 'desc' },
+    take: runId ? 1 : 5,
+  });
+  if (runs.length === 0) return `no runs for space ${spaceKey}`;
+  return runs
+    .map((run) => {
+      const s = (run.stats ?? {}) as StoredStats;
+      const p = s.progress;
+      const lines = [
+        `${run.id}  ${run.kind.toLowerCase()}  ${run.status}  ${run.applying ? 'applying' : 'dry run'}  started ${run.startedAt.toISOString()}${run.finishedAt ? `  finished ${run.finishedAt.toISOString()}` : ''}`,
+        `  planned ${s.planned ?? '?'}  applied ${s.applied ?? 0}  verified ${s.verified ?? 0}  failed ${s.failed ?? 0}  skipped ${s.skipped ?? 0}`,
+      ];
+      if (p) {
+        const pct = p.total ? Math.floor((p.done / p.total) * 100) : 100;
+        const eta =
+          run.status === 'RUNNING' && p.etaSeconds !== null
+            ? `  about ${Math.ceil(p.etaSeconds / 60)} min left`
+            : '';
+        lines.push(
+          `  progress ${p.done}/${p.total} (${pct}%)  ${p.perMinute}/min${eta}  as of ${p.updatedAt}`,
+        );
+      }
+      if (run.error) lines.push(`  error: ${run.error}`);
+      return lines.join('\n');
+    })
+    .join('\n');
+}

@@ -27,6 +27,7 @@ export function testEnv(overrides: Partial<Env> = {}): Env {
     NODE_ENV: 'test',
     DATABASE_URL: process.env.DATABASE_URL!,
     QOMON_API_BASE: 'https://qomon.invalid',
+    QOMON_RPS: 5,
     QOMON_WRITES_ALLOWED: true,
     MAX_WRITES_PER_RUN: 500,
     MAX_FAILED_SHARE: 0.2,

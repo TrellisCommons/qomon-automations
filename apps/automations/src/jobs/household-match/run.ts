@@ -7,6 +7,7 @@ import { withChangeLog } from '../../changelog/write.js';
 import type { Env } from '../../env.js';
 import type {
   JobRun,
+  Prisma,
   PrismaClient,
   RunStatus,
   Space,
@@ -46,6 +47,18 @@ export interface RunDeps {
   notify(text: string): Promise<void>;
   sleep?: (ms: number) => Promise<void>;
   now?: () => Date;
+  /** Aborting stops the run cleanly: the write in hand finishes, writes
+   *  already sent are verified, and the run ends INTERRUPTED. */
+  signal?: AbortSignal;
+}
+
+export interface Progress {
+  /** planned writes handled so far (written, skipped, or failed) */
+  done: number;
+  total: number;
+  perMinute: number;
+  etaSeconds: number | null;
+  updatedAt: string;
 }
 
 export interface RunStats extends PlanStats {
@@ -55,6 +68,9 @@ export interface RunStats extends PlanStats {
   applied: number;
   verified: number;
   failed: number;
+  /** unverified writes of earlier, abandoned runs, settled at start */
+  reconciled: number;
+  progress: Progress;
 }
 
 export type RunResult =
@@ -161,7 +177,18 @@ async function execute(
     space.householdValue,
   );
 
+  if (applying)
+    stats.reconciled = await reconcileAbandoned(
+      deps,
+      qomon,
+      space,
+      run,
+      presence,
+      log,
+    );
+
   const contacts = await collectContacts(qomon, { $all: [] });
+  if (deps.signal?.aborted) return interrupt(deps, run, log);
   const plan = planHouseholdMatch(contacts, presence, space.municipality);
   const limit = opts.maxWrites ?? deps.env.MAX_WRITES_PER_RUN;
   Object.assign(stats, plan.stats, {
@@ -185,6 +212,7 @@ async function execute(
   }
 
   if (!applying || plan.writes.length === 0) return 'SUCCEEDED';
+  if (deps.signal?.aborted) return interrupt(deps, run, log);
 
   if (plan.writes.length > limit) {
     if (opts.backfill) {
@@ -239,9 +267,15 @@ async function applyAndVerify(
       data: { status, detail: detail ?? null },
     });
 
+  const startedAt = now().getTime();
+  if (stats.reconciled === undefined) stats.reconciled = 0;
+  await announceBackfill(deps, space, run, writes.length, log);
+  let done = 0;
   for (let i = 0; i < writes.length; i += BATCH_SIZE) {
     const sent: typeof writes = [];
     for (const write of writes.slice(i, i + BATCH_SIZE)) {
+      if (deps.signal?.aborted) break;
+      done += 1;
       // Presence is one value that an upsert replaces: re-read right before
       // writing so a visit recorded since the fetch is not overwritten.
       let current;
@@ -352,7 +386,13 @@ async function applyAndVerify(
       await sleep(VERIFY_POLL_MS);
     }
     sync();
-    log.info(counts, 'batch done');
+    stats.progress = progressOf(done, writes.length, startedAt, now());
+    await deps.prisma.jobRun.update({
+      where: { id: run.id },
+      data: { stats: statsJson(stats) },
+    });
+    log.info({ ...counts, ...stats.progress }, 'batch done');
+    if (deps.signal?.aborted) return interrupt(deps, run, log);
 
     if (
       attempted >= deps.env.MIN_WRITES_FOR_FAILED_SHARE &&
@@ -399,7 +439,7 @@ async function finish(
     data: {
       status,
       finishedAt: now(),
-      stats: { ...stats },
+      stats: statsJson(stats),
       error: error ?? null,
     },
   });
@@ -421,6 +461,7 @@ async function report(
     (s.applied ?? 0) > 0 ||
     (s.failed ?? 0) > 0 ||
     result.status === 'FAILED' ||
+    result.status === 'INTERRUPTED' ||
     result.status === 'TRIPPED';
   if (!eventful) return;
   const icon =
@@ -446,4 +487,143 @@ async function report(
       'Slack alert failed',
     );
   }
+}
+
+function progressOf(
+  done: number,
+  total: number,
+  startedAt: number,
+  at: Date,
+): Progress {
+  const minutes = (at.getTime() - startedAt) / 60_000;
+  const perMinute = minutes > 0 ? done / minutes : 0;
+  return {
+    done,
+    total,
+    perMinute: Math.round(perMinute * 10) / 10,
+    etaSeconds:
+      perMinute > 0 ? Math.round(((total - done) / perMinute) * 60) : null,
+    updatedAt: at.toISOString(),
+  };
+}
+
+/** Writes not yet attempted when a run stops are marked, so the run's rows
+ *  say what happened; the next run plans them again. */
+async function interrupt(
+  deps: RunDeps,
+  run: JobRun,
+  log: Logger,
+): Promise<RunStatus> {
+  const { count } = await deps.prisma.plannedWrite.updateMany({
+    where: { runId: run.id, status: 'PLANNED' },
+    data: { status: 'SKIPPED', detail: 'run interrupted before this write' },
+  });
+  log.warn(
+    { notAttempted: count },
+    'run interrupted; the next run plans the rest again',
+  );
+  return 'INTERRUPTED';
+}
+
+/**
+ * A run killed outright (power loss, OOM, `kill -9`) stays RUNNING with up to
+ * a batch of writes sent but never read back. Holding the lock proves that
+ * run is dead, so settle its writes now: read each one back and record what
+ * Qomon has. Its unattempted writes are marked, and the run INTERRUPTED.
+ */
+async function reconcileAbandoned(
+  deps: RunDeps,
+  qomon: QomonApi,
+  space: Space,
+  run: JobRun,
+  presence: PresenceConfig,
+  log: Logger,
+): Promise<number> {
+  const now = deps.now ?? (() => new Date());
+  const abandoned = await deps.prisma.jobRun.findMany({
+    where: {
+      job: JOB,
+      spaceKey: space.key,
+      status: 'RUNNING',
+      id: { not: run.id },
+    },
+  });
+  let reconciled = 0;
+  for (const old of abandoned) {
+    const unsettled = await deps.prisma.plannedWrite.findMany({
+      where: { runId: old.id, status: { in: ['APPLYING', 'APPLIED'] } },
+    });
+    for (const write of unsettled) {
+      let seen;
+      try {
+        seen = presenceOf(
+          await qomon.getContact(write.contactId),
+          presence.form,
+        );
+      } catch (err) {
+        if (!(err instanceof QomonNotFoundError)) throw err;
+        seen = null;
+      }
+      const verified = seen?.refId === presence.household.id;
+      await deps.prisma.plannedWrite.update({
+        where: { id: write.id },
+        data: verified
+          ? {
+              status: 'VERIFIED',
+              detail: `verified by run ${run.id} after the run was abandoned`,
+            }
+          : {
+              status: 'FAILED',
+              detail: seen
+                ? `a different Presence was recorded (checked by run ${run.id})`
+                : `not in Qomon when run ${run.id} checked; planned again`,
+            },
+      });
+      reconciled += 1;
+    }
+    await deps.prisma.plannedWrite.updateMany({
+      where: { runId: old.id, status: 'PLANNED' },
+      data: { status: 'SKIPPED', detail: 'run abandoned before this write' },
+    });
+    await deps.prisma.jobRun.update({
+      where: { id: old.id },
+      data: {
+        status: 'INTERRUPTED',
+        finishedAt: now(),
+        error: `abandoned; settled by run ${run.id}`,
+      },
+    });
+    log.warn(
+      { abandonedRunId: old.id, settledWrites: unsettled.length },
+      'settled an abandoned run',
+    );
+  }
+  return reconciled;
+}
+
+/** Backfills take long enough that people want to know one has started and
+ *  roughly when it ends. Each write costs about three requests. */
+async function announceBackfill(
+  deps: RunDeps,
+  space: Space,
+  run: JobRun,
+  total: number,
+  log: Logger,
+): Promise<void> {
+  if (run.kind !== 'BACKFILL') return;
+  const minutes = Math.ceil((total * 3) / deps.env.QOMON_RPS / 60);
+  try {
+    await deps.notify(
+      `:hourglass_flowing_sand: ${JOB} backfill on space \`${space.key}\` started: ${total} writes, about ${minutes} min. Progress: \`pnpm job status --space ${space.key}\`. Run \`${run.id}\``,
+    );
+  } catch (err) {
+    log.error(
+      { err: err instanceof Error ? err.message : String(err) },
+      'Slack alert failed',
+    );
+  }
+}
+
+function statsJson(stats: Partial<RunStats>): Prisma.InputJsonValue {
+  return JSON.parse(JSON.stringify(stats)) as Prisma.InputJsonValue;
 }

@@ -10,7 +10,7 @@ import { resolvePresenceConfig } from './jobs/household-match/presence.js';
 import { tryAdvisoryLock } from './lock.js';
 import { createLogger } from './log.js';
 import { pingHealthcheck, postSlack } from './notify/slack.js';
-import { writeRunReport } from './report.js';
+import { runStatus, writeRunReport } from './report.js';
 import {
   getSpace,
   qomonFor,
@@ -26,6 +26,7 @@ const USAGE = `Usage: pnpm job <command> [options]
       space allow writes) write and verify. Without --apply it is a dry run.
       --backfill marks a one-off catch-up run; applying one needs --max-writes.
 
+  status --space <key> [--run <id>]      Recent runs, with progress and ETA while one is applying
   report --run <id> --out <file.csv>     A run's planned writes (contact ids only)
   space:add --key <key> --name <name> --canvassed <v1,v2,...> --household-value <v>
             [--municipality <city>] [--active-until <ISO date>] [--api-base <url>]
@@ -35,11 +36,29 @@ const USAGE = `Usage: pnpm job <command> [options]
   space:writes --key <key> (--on|--off) --reason <text>
 `;
 
-/** Exit codes: 0 done (or nothing to do), 1 failed, 2 a circuit breaker tripped. */
+/** Exit codes: 0 done (or nothing to do), 1 failed, 2 a circuit breaker
+ *  tripped, 3 interrupted (safe to run again). */
 function exitCodeFor(result: RunResult): number {
   if (result.status === 'FAILED') return 1;
   if (result.status === 'TRIPPED') return 2;
+  if (result.status === 'INTERRUPTED') return 3;
   return 0;
+}
+
+/** The first Ctrl-C or SIGTERM (systemd's stop) stops the run cleanly; a
+ *  second one exits at once, which a later run settles. */
+function stopOnSignals(): AbortSignal {
+  const controller = new AbortController();
+  for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+    process.on(sig, () => {
+      if (controller.signal.aborted) process.exit(130);
+      console.error(
+        `${sig}: finishing the write in hand and verifying what was sent; again to exit now`,
+      );
+      controller.abort();
+    });
+  }
+  return controller.signal;
 }
 
 async function readStdin(): Promise<string> {
@@ -96,6 +115,16 @@ async function main(argv: string[]): Promise<number> {
     switch (command) {
       case 'household-match':
         return await householdMatch(env, prisma, values);
+      case 'status': {
+        console.log(
+          await runStatus(
+            prisma,
+            required(values.space, '--space'),
+            values.run,
+          ),
+        );
+        return 0;
+      }
       case 'report': {
         if (!values.run || !values.out)
           throw new UsageError('report needs --run and --out');
@@ -227,6 +256,7 @@ async function householdMatch(
         qomonFor: (space) => qomonFor(space, env, secretKey),
         lock: (name) => tryAdvisoryLock(env.DATABASE_URL, name),
         notify: (text) => postSlack(env, text),
+        signal: stopOnSignals(),
       },
       {
         spaceKey: required(values.space, '--space'),
