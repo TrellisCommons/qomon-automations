@@ -1,3 +1,7 @@
+// Household match job: spaces, runs, planned writes, and the change log.
+// Contact ids are Qomon's; no names, addresses, or other contact data are
+// stored here.
+
 generator client {
   provider = "prisma-client-js"
   output   = "../src/generated/prisma"
@@ -6,4 +10,121 @@ generator client {
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+}
+
+/// One campaign's Qomon space. Spaces are configuration: a job always runs
+/// against one named space.
+model Space {
+  /// short name used on the command line (`--space <key>`)
+  key                  String    @id
+  name                 String
+  /// AES-256-GCM with SPACE_SECRET_KEY; never logged or printed
+  qomonApiKeyEncrypted String
+  /// null uses QOMON_API_BASE
+  qomonApiBase         String?
+  /// the space switch; turning it on or off is change-logged
+  writesEnabled        Boolean   @default(false)
+  /// after this instant a run logs that the space is inactive and exits
+  activeUntil          DateTime?
+  /// contacts whose city is this (or blank) are matched; null matches all
+  municipality         String?
+  /// stored Presence values that count as a canvass and trigger the match
+  canvassedValues      String[]
+  /// stored Presence value written to the rest of the household
+  householdValue       String
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  runs JobRun[]
+
+  @@map("space")
+}
+
+enum RunKind {
+  HOURLY
+  BACKFILL
+}
+
+enum RunStatus {
+  RUNNING
+  SUCCEEDED
+  /// a circuit breaker stopped the run
+  TRIPPED
+  FAILED
+}
+
+model JobRun {
+  id         String     @id @default(cuid())
+  job        String
+  spaceKey   String
+  kind       RunKind
+  /// true when every write guard allowed writing
+  applying   Boolean
+  status     RunStatus  @default(RUNNING)
+  startedAt  DateTime   @default(now())
+  finishedAt DateTime?
+  /// counts only (fetched, planned, applied, verified, failed, ...)
+  stats      Json?
+  error      String?
+
+  space  Space          @relation(fields: [spaceKey], references: [key])
+  writes PlannedWrite[]
+
+  @@index([spaceKey, startedAt])
+  @@map("job_run")
+}
+
+enum WriteStatus {
+  PLANNED
+  /// re-read before writing: it already had a Presence, or moved
+  SKIPPED
+  /// change-logged, upsert being sent
+  APPLYING
+  /// Qomon accepted the upsert (202); not yet seen
+  APPLIED
+  /// read back with the new value
+  VERIFIED
+  FAILED
+}
+
+/// One change the run decided on. The run's report is built from these.
+model PlannedWrite {
+  id               String      @id @default(cuid())
+  runId            String
+  contactId        Int
+  field            String
+  valueBefore      String?
+  valueAfter       String
+  /// the canvassed contact at the same address that triggered this write
+  triggerContactId Int
+  reason           String
+  status           WriteStatus @default(PLANNED)
+  detail           String?
+  updatedAt        DateTime    @updatedAt
+
+  run JobRun @relation(fields: [runId], references: [id])
+
+  @@index([runId, status])
+  @@index([contactId])
+  @@map("planned_write")
+}
+
+/// Append-only audit trail of every change the automation made, to Qomon or
+/// to its own switches.
+model ChangeLogEntry {
+  id            String   @id @default(cuid())
+  /// e.g. "QomonContact", "Space"
+  subjectType   String
+  subjectId     String
+  actor         String
+  reason        String
+  before        Json?
+  after         Json?
+  at            DateTime @default(now())
+  correlationId String
+
+  @@index([subjectType, subjectId])
+  @@index([correlationId])
+  @@index([at])
+  @@map("change_log_entry")
 }

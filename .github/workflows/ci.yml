@@ -49,3 +49,25 @@ jobs:
 
       - name: lint · typecheck · test · build
         run: pnpm turbo run lint typecheck test build
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the job image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: job
+          push: false
+      - name: Build the tools (migrate) image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: tools
+          push: false
+      - name: Compose file is valid
+        run: |
+          sudo mkdir -p /etc/qomon-automations && sudo touch /etc/qomon-automations/.env
+          POSTGRES_PASSWORD=ci docker compose config --quiet

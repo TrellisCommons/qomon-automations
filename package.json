@@ -15,7 +15,8 @@
     "test": "turbo run test",
     "check": "turbo run lint typecheck test",
     "format": "prettier --write --no-error-on-unmatched-pattern \"apps/**/*.ts\" \"packages/**/*.ts\"",
-    "format:check": "prettier --check --no-error-on-unmatched-pattern \"apps/**/*.ts\" \"packages/**/*.ts\""
+    "format:check": "prettier --check --no-error-on-unmatched-pattern \"apps/**/*.ts\" \"packages/**/*.ts\"",
+    "job": "pnpm --filter @trellis/automations job"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",

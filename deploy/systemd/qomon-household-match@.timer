@@ -1,0 +1,11 @@
+[Unit]
+Description=Hourly Qomon household match (%i)
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=120
+# a missed hour runs at boot
+Persistent=true
+
+[Install]
+WantedBy=timers.target

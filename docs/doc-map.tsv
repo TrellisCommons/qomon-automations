@@ -5,3 +5,5 @@
 # any changed file matches the doc path or glob.
 # Consumed by scripts/check-doc-sync.sh and the doc-sync skill, and
 # referenced from CLAUDE.md. Edit this file, not the check, to change coverage.
+apps/automations/* packages/address-match-core/* deploy/* Dockerfile compose.yaml	docs/household-match/*	design.md (rules, decisions, breakers) / runbook.md (commands, setup, exit codes)
+packages/qomon-client/*	docs/integrations/qomon-api.md	dated Qomon facts the client or its contract suite relies on

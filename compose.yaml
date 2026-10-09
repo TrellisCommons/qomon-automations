@@ -1,0 +1,58 @@
+# The droplet's stack: Postgres, the migration job, and the job image.
+# docs/household-match/runbook.md has the setup. From the repo checkout:
+#
+#   docker compose up -d db && docker compose run --rm migrate
+#   docker compose run --rm job household-match --space <key>          # dry run
+#
+# `job` is never started by `up`: the systemd timer runs it (deploy/systemd).
+name: qomon-automations
+
+x-env: &env
+  env_file:
+    - /etc/qomon-automations/.env
+  environment:
+    DATABASE_URL: postgresql://qomon:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@db:5432/qomon_automations
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: qomon
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: qomon_automations
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    # not published to the host
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U qomon -d qomon_automations']
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    <<: *env
+    build:
+      context: .
+      target: tools
+    image: ${IMAGE_PREFIX:-qomon-automations}-tools:${IMAGE_TAG:-latest}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: 'no'
+    profiles: ['tools']
+
+  job:
+    <<: *env
+    build:
+      context: .
+      target: job
+    image: ${IMAGE_PREFIX:-qomon-automations}-job:${IMAGE_TAG:-latest}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: 'no'
+    profiles: ['job']
+
+volumes:
+  db_data:
