@@ -1,0 +1,19 @@
+# Hourly household match for one space: the instance name is the space key.
+#   systemctl enable --now qomon-household-match@<space-key>.timer
+# A oneshot unit that is still running is not started again, so a slow run
+# delays the next one; the job's advisory lock also stops a manual run from
+# overlapping it. Exit 2 means a circuit breaker tripped (writes now off).
+[Unit]
+Description=Qomon household match (%i)
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/qomon-automations
+EnvironmentFile=/etc/qomon-automations/compose.env
+ExecStart=/usr/bin/docker compose --profile job run --rm job household-match --space %i --apply
+TimeoutStartSec=50min
+# On stop or timeout the job gets SIGTERM, finishes the write in hand, and
+# verifies what it sent (up to VERIFY_TIMEOUT_SECONDS) before exiting 3.
+TimeoutStopSec=5min

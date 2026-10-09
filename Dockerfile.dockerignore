@@ -1,0 +1,16 @@
+**/node_modules
+**/dist
+**/.turbo
+**/*.tsbuildinfo
+**/.env
+**/.env.*
+!**/.env.example
+**/.claude
+**/__pycache__
+**/.DS_Store
+apps/automations/src/generated
+.git
+claude
+deploy
+docs
+scripts

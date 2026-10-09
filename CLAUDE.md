@@ -62,3 +62,9 @@ Tests need Postgres at `DATABASE_URL`; the test setup runs `prisma migrate deplo
 ## Docs are shared memory
 
 `docs/README.md` describes the system. Before working in an area, read the docs `docs/doc-map.tsv` maps to it. After changing behaviour in a mapped area, update its docs in the same PR (the **doc-sync** skill); the Doc Sync check enforces it, and the `docs-not-needed` label overrides it. Overdue docs get the **doc-review** skill.
+
+## Knowledge base
+
+- `docs/household-match/design.md`: the job's rules, decisions, guards, and breakers. Read before changing the job.
+- `docs/household-match/runbook.md`: setting up a space, the backfill, the hourly timer, and what to do when a breaker trips.
+- `docs/integrations/qomon-api.md`: dated Qomon API behaviour the client relies on.
