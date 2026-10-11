@@ -28,6 +28,43 @@ const EnvSchema = z.object({
   /** How long a write may take to show up in Qomon before it counts as
    *  failed. Upserts are asynchronous and usually visible in seconds. */
   VERIFY_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(120),
+  /** Incremental job (docs/household-match/incremental-design.md). Each
+   *  ingest re-reads this far behind the cursor, to cover search lag and
+   *  clock skew; duplicates are harmless. */
+  INCREMENTAL_OVERLAP_SECONDS: z.coerce
+    .number()
+    .int()
+    .nonnegative()
+    .default(120),
+  /** Sanity limit for one incremental run: a plan larger than this means
+   *  something is wrong, so the run writes nothing and turns writes off. */
+  INCREMENTAL_MAX_WRITES_PER_RUN: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(5000),
+  /** Due households one incremental run takes, oldest first; a burst
+   *  drains over several runs instead of tripping the sanity limit. */
+  INCREMENTAL_MAX_HOUSEHOLDS_PER_RUN: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(1000),
+  /** A run that cannot write (a dry run, or writes off) re-plans a household
+   *  with pending writes no sooner than this. */
+  DRY_RUN_RECHECK_MINUTES: z.coerce.number().positive().default(60),
+  /** A sweep that finds more contacts missing than this deletes none of
+   *  them: a listing that short is more likely wrong than a mass deletion. */
+  SWEEP_MAX_DELETES: z.coerce.number().int().nonnegative().default(500),
+  /** A household that fails this many times is quarantined. */
+  QUARANTINE_AFTER_ATTEMPTS: z.coerce.number().int().positive().default(5),
+  INGEST_LAG_ALERT_MINUTES: z.coerce.number().positive().default(10),
+  WORK_LAG_ALERT_MINUTES: z.coerce.number().positive().default(15),
+  /** Changed contacts in one ingest above this is reported as a spike. */
+  CHANGE_SPIKE_THRESHOLD: z.coerce.number().int().positive().default(5000),
+  /** Contacts a sweep finds the minutely ingest missed, above which the
+   *  incremental job is not to be trusted until explained. */
+  SWEEP_DRIFT_THRESHOLD: z.coerce.number().int().nonnegative().default(10),
   /** 32 bytes, base64. Encrypts each space's Qomon API key at rest. */
   SPACE_SECRET_KEY: z
     .string()
@@ -39,6 +76,10 @@ const EnvSchema = z.object({
   SLACK_BOT_TOKEN: z.string().optional(),
   SLACK_CHANNEL: z.string().optional(),
   HEALTHCHECK_URL: z.string().url().optional(),
+  /** Separate checks, so the minutely run's pings cannot hide a failed or
+   *  missing sweep or full run. */
+  HEALTHCHECK_URL_INCREMENTAL: z.string().url().optional(),
+  HEALTHCHECK_URL_SWEEP: z.string().url().optional(),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

@@ -1,0 +1,18 @@
+# Incremental household match for one space (instance = space key):
+# changes since the cursor, then dirty households.
+#   systemctl enable --now qomon-household-match-incremental@<space-key>.timer
+# A oneshot still running when the timer fires is not started again: a long
+# run (a burst of changes) simply skips ticks. Exit 2 means a breaker tripped.
+[Unit]
+Description=Qomon household match, incremental (%i)
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/qomon-automations
+EnvironmentFile=/etc/qomon-automations/compose.env
+ExecStart=/usr/bin/docker compose --profile job run --rm job household-match --space %i --incremental --apply
+# a run killed here restarts from the same cursor on the next tick
+TimeoutStartSec=2h
+TimeoutStopSec=5min

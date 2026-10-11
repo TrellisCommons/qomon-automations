@@ -1,10 +1,12 @@
 import {
+  QomonMalformedResponseError,
   QomonNotFoundError,
   collectContacts,
   type QomonApi,
+  type QomonContact,
 } from '@trellis/qomon-client';
 import { withChangeLog } from '../../changelog/write.js';
-import type { Env } from '../../env.js';
+import { requireSecretKey, type Env } from '../../env.js';
 import type {
   JobRun,
   Prisma,
@@ -16,7 +18,14 @@ import type { HeldLock } from '../../lock.js';
 import type { Logger } from '../../log.js';
 import { resolveWriteMode } from '../../qomon/write-mode.js';
 import { getSpace, setWritesEnabled } from '../../spaces/spaces.js';
-import { householdKeyOf, planHouseholdMatch, type PlanStats } from './plan.js';
+import { executeIncremental, incrementalAlerts } from './incremental.js';
+import {
+  householdKeyOf,
+  planHouseholdMatch,
+  type PlanStats,
+  type PlannedHouseholdWrite,
+  type PlannedRemark,
+} from './plan.js';
 import {
   classifyPresence,
   isMarked,
@@ -34,6 +43,7 @@ const BATCH_SIZE = 20;
 /** PlannedWrite.field of a marker change; household values are 'presence' */
 const REMARK_FIELD = 'presence_source';
 const VERIFY_POLL_MS = 3_000;
+const ERRORS_IN_A_ROW_FAIL_RUN = 3;
 
 export interface RunOptions {
   spaceKey: string;
@@ -43,6 +53,10 @@ export interface RunOptions {
   backfill: boolean;
   /** `--max-writes`: overrides MAX_WRITES_PER_RUN; required to apply a backfill */
   maxWrites?: number;
+  /** `full` (the default) fetches the whole space and plans everything;
+   *  `incremental` reads changes since the cursor and plans dirty
+   *  households; `sweep` refetches everything into the mirror first. */
+  mode?: 'full' | 'incremental' | 'sweep';
 }
 
 export interface RunDeps {
@@ -57,6 +71,8 @@ export interface RunDeps {
   /** Aborting stops the run cleanly: the write in hand finishes, writes
    *  already sent are verified, and the run ends INTERRUPTED. */
   signal?: AbortSignal;
+  /** 429s seen by this process's Qomon client so far */
+  rateLimited?: () => number;
 }
 
 export interface Progress {
@@ -78,6 +94,8 @@ export interface RunStats extends PlanStats {
   /** unverified writes of earlier, abandoned runs, settled at start */
   reconciled: number;
   progress: Progress;
+  /** contacts that failed validation and were set aside */
+  invalidContacts: number;
 }
 
 export type RunResult =
@@ -96,6 +114,9 @@ export class UsageError extends Error {
     this.name = 'UsageError';
   }
 }
+
+const SWEEP_LOCK_WAIT_MS = 15 * 60_000;
+const LOCK_POLL_MS = 5_000;
 
 export async function runHouseholdMatch(
   deps: RunDeps,
@@ -119,7 +140,23 @@ export async function runHouseholdMatch(
     );
   }
 
-  const lock = await deps.lock(`${JOB}:${space.key}`);
+  const lockName = `${JOB}:${space.key}`;
+  let lock = await deps.lock(lockName);
+  // The sweep runs once a night: it waits out a minutely run rather than
+  // being skipped for the day.
+  if (!lock && opts.mode === 'sweep') {
+    const sleep =
+      deps.sleep ??
+      ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+    for (
+      let waited = 0;
+      !lock && waited < SWEEP_LOCK_WAIT_MS;
+      waited += LOCK_POLL_MS
+    ) {
+      await sleep(LOCK_POLL_MS);
+      lock = await deps.lock(lockName);
+    }
+  }
   if (!lock) {
     log.warn('another run holds the lock; exiting');
     return { status: 'locked' };
@@ -129,7 +166,14 @@ export async function runHouseholdMatch(
     data: {
       job: JOB,
       spaceKey: space.key,
-      kind: opts.backfill ? 'BACKFILL' : 'HOURLY',
+      kind:
+        opts.mode === 'incremental'
+          ? 'INCREMENTAL'
+          : opts.mode === 'sweep'
+            ? 'SWEEP'
+            : opts.backfill
+              ? 'BACKFILL'
+              : 'HOURLY',
       applying: mode.applying,
     },
   });
@@ -154,14 +198,14 @@ export async function runHouseholdMatch(
       runLog,
     );
     const result = await finish(deps, run, status, stats);
-    await report(deps, space, result, opts, runLog);
+    await alert(deps, space, result, opts, runLog);
     return result;
   } catch (err) {
     const error =
       err instanceof Error ? `${err.name}: ${err.message}` : String(err);
     runLog.error({ err: error }, 'run failed');
     const result = await finish(deps, run, 'FAILED', stats, error);
-    await report(deps, space, result, opts, runLog);
+    await alert(deps, space, result, opts, runLog);
     return result;
   } finally {
     await lock.release();
@@ -190,7 +234,56 @@ async function execute(
       log,
     );
 
-  const contacts = await collectContacts(qomon, { $all: [] });
+  if (opts.mode === 'incremental' || opts.mode === 'sweep') {
+    return executeIncremental({
+      deps,
+      opts,
+      space,
+      run,
+      applying,
+      qomon,
+      presence,
+      secret: requireSecretKey(deps.env),
+      stats,
+      log,
+      write: {
+        persistPlan: (writes, remarks) =>
+          persistPlan(deps, run, presence, writes, remarks),
+        apply: (addressUnchanged, ownWrites) =>
+          applyAndVerify(
+            deps,
+            qomon,
+            space,
+            run,
+            presence,
+            addressUnchanged,
+            ownWrites,
+            stats,
+            log,
+            { failWriteOnError: true },
+          ),
+        trip: (reason) => trip(deps, space, reason, log),
+        interrupt: () => interrupt(deps, run, log),
+        ownWrites: (contactIds) =>
+          loadOwnWrites(deps.prisma, space.key, contactIds),
+      },
+    });
+  }
+
+  stats.invalidContacts = 0;
+  const contacts = await collectContacts(
+    qomon,
+    { $all: [] },
+    {
+      onInvalid: (invalid) => {
+        stats.invalidContacts! += 1;
+        log.warn(
+          { contactId: invalid.id, error: invalid.error },
+          'contact failed validation; set aside',
+        );
+      },
+    },
+  );
   if (deps.signal?.aborted) return interrupt(deps, run, log);
   const ownWrites = await loadOwnWrites(deps.prisma, space.key);
   const plan = planHouseholdMatch(
@@ -204,32 +297,7 @@ async function execute(
   Object.assign(stats, plan.stats, { limit, overLimit: total > limit });
   log.info({ ...plan.stats, limit }, 'planned');
 
-  if (plan.writes.length > 0) {
-    await deps.prisma.plannedWrite.createMany({
-      data: plan.writes.map((w) => ({
-        runId: run.id,
-        contactId: w.contactId,
-        field: 'presence',
-        valueBefore: null,
-        valueAfter: presence.household.value,
-        triggerContactId: w.triggerContactId,
-        reason: `household of contact ${w.triggerContactId} (${w.triggerValue}${w.triggerDate ? ` on ${w.triggerDate.slice(0, 10)}` : ''})`,
-      })),
-    });
-  }
-  if (plan.remarks.length > 0) {
-    await deps.prisma.plannedWrite.createMany({
-      data: plan.remarks.map((r) => ({
-        runId: run.id,
-        contactId: r.contactId,
-        field: REMARK_FIELD,
-        valueBefore: presence.marker.value.value,
-        valueAfter: presence.marker.recanvassed.value,
-        triggerContactId: r.contactId,
-        reason: `Presence recorded as ${r.presenceValue} after the household match`,
-      })),
-    });
-  }
+  await persistPlan(deps, run, presence, plan.writes, plan.remarks);
 
   if (!applying || total === 0) return 'SUCCEEDED';
   if (deps.signal?.aborted) return interrupt(deps, run, log);
@@ -258,11 +326,46 @@ async function execute(
     space,
     run,
     presence,
-    keys,
+    (current, id) => householdKeyOf(current) === keys.get(id),
     ownWrites,
     stats,
     log,
   );
+}
+
+async function persistPlan(
+  deps: RunDeps,
+  run: JobRun,
+  presence: PresenceConfig,
+  writes: PlannedHouseholdWrite[],
+  remarks: PlannedRemark[],
+): Promise<void> {
+  if (writes.length > 0) {
+    await deps.prisma.plannedWrite.createMany({
+      data: writes.map((w) => ({
+        runId: run.id,
+        contactId: w.contactId,
+        field: 'presence',
+        valueBefore: null,
+        valueAfter: presence.household.value,
+        triggerContactId: w.triggerContactId,
+        reason: `household of contact ${w.triggerContactId} (${w.triggerValue}${w.triggerDate ? ` on ${w.triggerDate.slice(0, 10)}` : ''})`,
+      })),
+    });
+  }
+  if (remarks.length > 0) {
+    await deps.prisma.plannedWrite.createMany({
+      data: remarks.map((r) => ({
+        runId: run.id,
+        contactId: r.contactId,
+        field: REMARK_FIELD,
+        valueBefore: presence.marker.value.value,
+        valueAfter: presence.marker.recanvassed.value,
+        triggerContactId: r.contactId,
+        reason: `Presence recorded as ${r.presenceValue} after the household match`,
+      })),
+    });
+  }
 }
 
 async function applyAndVerify(
@@ -271,11 +374,23 @@ async function applyAndVerify(
   space: Space,
   run: JobRun,
   presence: PresenceConfig,
-  keys: Map<number | undefined, string | null>,
+  addressUnchanged: (current: QomonContact, contactId: number) => boolean,
   ownWrites: OwnWrites,
   stats: Partial<RunStats>,
   log: Logger,
+  /** An incremental run fails one write on a Qomon error, so its household
+   *  backs off and quarantines; a full run fails and runs again next hour. */
+  { failWriteOnError = false }: { failWriteOnError?: boolean } = {},
 ): Promise<RunStatus> {
+  // Errors on several contacts in a row are Qomon failing, not a contact:
+  // fail the run, so an outage stalls and alerts instead of quarantining
+  // every household it touches.
+  let errorsInARow = 0;
+  const contactError = (err: unknown) => {
+    errorsInARow += 1;
+    if (!failWriteOnError || errorsInARow >= ERRORS_IN_A_ROW_FAIL_RUN)
+      throw err;
+  };
   const sleep =
     deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const now = deps.now ?? (() => new Date());
@@ -311,8 +426,21 @@ async function applyAndVerify(
       let current;
       try {
         current = await qomon.getContact(write.contactId);
+        errorsInARow = 0;
       } catch (err) {
-        if (!(err instanceof QomonNotFoundError)) throw err;
+        // One malformed contact fails its own write, not the run, so its
+        // household can back off and quarantine like any other failure.
+        if (err instanceof QomonMalformedResponseError) {
+          await mark(write.id, 'FAILED', 'contact failed validation');
+          counts.failed += 1;
+          continue;
+        }
+        if (!(err instanceof QomonNotFoundError)) {
+          contactError(err);
+          await mark(write.id, 'FAILED', `re-read failed: ${errorText(err)}`);
+          counts.failed += 1;
+          continue;
+        }
         await mark(write.id, 'SKIPPED', 'contact no longer exists');
         counts.skipped += 1;
         continue;
@@ -328,7 +456,7 @@ async function applyAndVerify(
           : 'no longer needs re-marking'
         : presenceOf(current, presence.form)
           ? 'has a Presence since the fetch'
-          : householdKeyOf(current) !== keys.get(write.contactId)
+          : !addressUnchanged(current, write.contactId)
             ? 'address changed since the fetch'
             : null;
       if (skip) {
@@ -412,7 +540,17 @@ async function applyAndVerify(
     const deadline = now().getTime() + deps.env.VERIFY_TIMEOUT_SECONDS * 1000;
     while (pending.size > 0) {
       for (const write of [...pending.values()]) {
-        const seen = await readBack(qomon, write, presence);
+        let seen: ReadBack;
+        try {
+          seen = await readBack(qomon, write, presence);
+          errorsInARow = 0;
+        } catch (err) {
+          contactError(err);
+          pending.delete(write.id);
+          await mark(write.id, 'FAILED', `read-back failed: ${errorText(err)}`);
+          counts.failed += 1;
+          continue;
+        }
         if (seen.state === 'pending') continue;
         pending.delete(write.id);
         if (seen.state === 'verified') {
@@ -503,6 +641,26 @@ async function finish(
     },
   });
   return { status, runId: run.id, applying: run.applying, stats, error };
+}
+
+/** Never throws: a run's recorded outcome must not depend on alerting. */
+async function alert(
+  deps: RunDeps,
+  space: Space,
+  result: RunResult,
+  opts: RunOptions,
+  log: Logger,
+): Promise<void> {
+  try {
+    await (opts.mode === 'incremental' || opts.mode === 'sweep'
+      ? incrementalAlerts(deps, space, opts, result)
+      : report(deps, space, result, opts, log));
+  } catch (err) {
+    log.error(
+      { err: err instanceof Error ? err.message : String(err) },
+      'alerting failed',
+    );
+  }
 }
 
 /** Slack hears about a run only when something went wrong: a write failed,
@@ -664,24 +822,50 @@ export async function loadPresenceConfig(
   );
 }
 
-/** Contacts this job wrote and verified in the space, with the Presence date
- *  each write got (see `classifyPresence`). */
+/** Contacts this job wrote and verified in the space (or, given ids, just
+ *  those), with the Presence date each write got (see `classifyPresence`). */
 async function loadOwnWrites(
   prisma: PrismaClient,
   spaceKey: string,
+  contactIds?: number[],
 ): Promise<OwnWrites> {
-  const rows = await prisma.plannedWrite.findMany({
-    where: { status: 'VERIFIED', field: 'presence', run: { spaceKey } },
-    select: { contactId: true, writtenPresenceDate: true },
-    orderBy: { updatedAt: 'asc' },
-  });
-  return new Map(rows.map((r) => [r.contactId, r.writtenPresenceDate]));
+  const own = new Map<number, string | null>();
+  const chunks =
+    contactIds === undefined
+      ? [undefined]
+      : Array.from({ length: Math.ceil(contactIds.length / 1000) }, (_, i) =>
+          contactIds.slice(i * 1000, (i + 1) * 1000),
+        );
+  for (const ids of chunks) {
+    const rows = await prisma.plannedWrite.findMany({
+      where: {
+        status: 'VERIFIED',
+        field: 'presence',
+        run: { spaceKey },
+        ...(ids ? { contactId: { in: ids } } : {}),
+      },
+      select: { contactId: true, writtenPresenceDate: true },
+      orderBy: { updatedAt: 'asc' },
+    });
+    for (const r of rows) own.set(r.contactId, r.writtenPresenceDate);
+  }
+  return own;
+}
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 type ReadBack =
   | { state: 'verified'; date: string | null }
   | {
-      state: 'pending' | 'different' | 'unmarked' | 'markerChanged' | 'deleted';
+      state:
+        | 'pending'
+        | 'different'
+        | 'unmarked'
+        | 'markerChanged'
+        | 'deleted'
+        | 'malformed';
     };
 
 const READ_BACK_FAILURES = {
@@ -689,6 +873,7 @@ const READ_BACK_FAILURES = {
   unmarked: 'the household value is there without its marker',
   markerChanged: 'the marker was changed or removed by someone else',
   deleted: 'contact deleted before it could be verified',
+  malformed: 'contact failed validation when read back',
 } as const;
 
 /** A write is verified when Qomon shows the household value with its
@@ -703,6 +888,8 @@ async function readBack(
     contact = await qomon.getContact(write.contactId);
   } catch (err) {
     if (err instanceof QomonNotFoundError) return { state: 'deleted' };
+    if (err instanceof QomonMalformedResponseError)
+      return { state: 'malformed' };
     throw err;
   }
   if (write.field === REMARK_FIELD) {

@@ -13,6 +13,10 @@ import { createLogger } from './log.js';
 import { pingHealthcheck, postSlack } from './notify/slack.js';
 import { runStatus, writeRunReport } from './report.js';
 import {
+  healthOf,
+  releaseHousehold,
+} from './jobs/household-match/incremental.js';
+import {
   getSpace,
   qomonFor,
   redact,
@@ -23,12 +27,15 @@ import {
 const USAGE = `Usage: pnpm job <command> [options]
 
   household-match --space <key> [--apply] [--backfill] [--max-writes <n>] [--report <file.csv>]
+                  [--incremental | --sweep]
       Fetch the space, plan, and (with --apply, when the environment and the
       space allow writes) write and verify. Without --apply it is a dry run.
       --backfill marks a one-off catch-up run; applying one needs --max-writes.
 
   status --space <key> [--run <id>]      Recent runs, with progress and ETA while one is applying
   report --run <id> --out <file.csv>     A run's planned writes (contact ids only)
+  release --space <key> (--contact <id> | --household <hash>)
+      Put a quarantined household back in line (incremental job).
   space:add --key <key> --name <name> --canvassed <v1,v2,...>
             [--household-value <v>] [--marker-field <label>] [--marker-value <v>]
             [--recanvassed-value <v>]
@@ -42,9 +49,12 @@ const USAGE = `Usage: pnpm job <command> [options]
 `;
 
 /** Exit codes: 0 done (or nothing to do), 1 failed, 2 a circuit breaker
- *  tripped, 3 interrupted (safe to run again). */
-function exitCodeFor(result: RunResult): number {
+ *  tripped, 3 interrupted (safe to run again), 4 a sweep skipped because
+ *  another run held the lock. */
+function exitCodeFor(result: RunResult, mode?: string): number {
   if (result.status === 'FAILED') return 1;
+  // a skipped sweep must not ping the health check as healthy
+  if (result.status === 'locked' && mode === 'sweep') return 4;
   if (result.status === 'TRIPPED') return 2;
   if (result.status === 'INTERRUPTED') return 3;
   return 0;
@@ -94,6 +104,10 @@ async function main(argv: string[]): Promise<number> {
       apply: { type: 'boolean', default: false },
       backfill: { type: 'boolean', default: false },
       'max-writes': { type: 'string' },
+      incremental: { type: 'boolean', default: false },
+      sweep: { type: 'boolean', default: false },
+      contact: { type: 'string' },
+      household: { type: 'string' },
       report: { type: 'string' },
       run: { type: 'string' },
       out: { type: 'string' },
@@ -123,6 +137,27 @@ async function main(argv: string[]): Promise<number> {
     switch (command) {
       case 'household-match':
         return await householdMatch(env, prisma, values);
+      case 'release': {
+        const spaceKey = required(values.space, '--space');
+        let target: { householdHash: string } | { contactId: number };
+        if (values.household) target = { householdHash: values.household };
+        else {
+          const contactId = Number(
+            required(values.contact, '--contact or --household'),
+          );
+          if (!Number.isInteger(contactId) || contactId <= 0)
+            throw new UsageError('--contact must be a positive integer');
+          target = { contactId };
+        }
+        const hash = await releaseHousehold(prisma, spaceKey, target);
+        console.log(
+          hash
+            ? `released household ${hash}`
+            : // a contact that moved since resolves to its new household
+              'no such dirty household; if the contact moved, release by --household (from `dirty_household`)',
+        );
+        return hash ? 0 : 1;
+      }
       case 'status': {
         console.log(
           await runStatus(
@@ -236,8 +271,21 @@ async function householdMatch(
     backfill: boolean;
     'max-writes'?: string;
     report?: string;
+    incremental: boolean;
+    sweep: boolean;
   },
 ): Promise<number> {
+  if (values.incremental && values.sweep) {
+    throw new UsageError(
+      '--incremental and --sweep are separate runs; a sweep includes the incremental work',
+    );
+  }
+  const mode = values.sweep
+    ? 'sweep'
+    : values.incremental
+      ? 'incremental'
+      : 'full';
+  let rateLimited = 0;
   const maxWrites =
     values['max-writes'] === undefined
       ? undefined
@@ -257,7 +305,9 @@ async function householdMatch(
         prisma,
         env,
         log,
-        qomonFor: (space) => qomonFor(space, env, secretKey),
+        qomonFor: (space) =>
+          qomonFor(space, env, secretKey, () => (rateLimited += 1)),
+        rateLimited: () => rateLimited,
         lock: (name) => tryAdvisoryLock(env.DATABASE_URL, name),
         notify: (text) => postSlack(env, text),
         signal: stopOnSignals(),
@@ -267,6 +317,7 @@ async function householdMatch(
         apply: values.apply,
         backfill: values.backfill,
         maxWrites,
+        mode,
       },
     );
     if ('runId' in result) {
@@ -283,10 +334,23 @@ async function householdMatch(
         console.log(`wrote ${n} rows to ${values.report}`);
       }
     }
-    return exitCodeFor(result);
+    return exitCodeFor(result, mode);
   } finally {
-    const ok = result !== undefined && exitCodeFor(result) === 0;
-    await pingHealthcheck(env, ok).catch((err) =>
+    const ok = result !== undefined && exitCodeFor(result, mode) === 0;
+    // the ping's body is what Healthchecks shows: for the incremental job,
+    // how far behind it is
+    const body =
+      mode === 'full' || !values.space
+        ? undefined
+        : JSON.stringify(
+            await healthOf(prisma, values.space, new Date()).catch(() => null),
+          );
+    const check = {
+      full: env.HEALTHCHECK_URL,
+      incremental: env.HEALTHCHECK_URL_INCREMENTAL,
+      sweep: env.HEALTHCHECK_URL_SWEEP,
+    }[mode];
+    await pingHealthcheck(check, ok, body).catch((err) =>
       log.warn({ err: String(err) }, 'health check ping failed'),
     );
   }

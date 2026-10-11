@@ -40,15 +40,18 @@ As of 2026-10-11 (University—Rosedale test space; the contract suite's marker 
 ## Search
 
 - `POST /search` queries are exactly two levels deep (root operator, then nodes of conditions); a condition directly under the root gets a 422. `{ $all: [] }` matches every contact.
-- No `total`: page until a page is shorter than `per_page` (at most 1000).
+- No `total`: page until a page is shorter than `per_page` (at most 1000). The client counts a contact it set aside (below) toward the page, so one bad record does not end the paging early.
+- Paging is by live offset: a contact deleted, or moved out of the query, on an earlier page shifts every later result, so a contact at a page boundary can be returned twice or not at all. Anything that must see every contact (the incremental job's sweep) confirms a contact missing from the listing with `GET /contacts/{id}` before treating it as gone.
+- `UpdatedAt` takes `gte`, `lte`, and ranges, to the second (test space, 2026-10-11).
 - Each contact carries its form answers (`formdatas`, with value and date) inline when it has any.
 - `eql` is a case-insensitive token or prefix match, not equality (`address.city eql "Test"` matches "Testville").
 - `form ext` ignores `form_ref_ids`.
 - About 1 second per 1,000-contact page.
+- The client validates search results contact by contact: a contact that fails the schema is set aside and reported to `onInvalid` with its id and error, and the rest of the page is used. `GET /contacts/{id}` still validates the whole contact and throws `QomonMalformedResponseError`, which the job records as a failed write for that contact alone.
 
 ## Rate limits
 
-Undocumented, but every response carries them (as of 2026-10-07): `x-ratelimit-limit: burst:100;rate:10.0`, `x-ratelimit-cost: 1` per request (a 1,000-contact search page included), and `x-ratelimit-remaining`. Draining the burst returns 429. The client paces itself at 5 requests per second.
+Undocumented, but every response carries them (as of 2026-10-07): `x-ratelimit-limit: burst:100;rate:10.0`, `x-ratelimit-cost: 1` per request (a 1,000-contact search page included), and `x-ratelimit-remaining`. Draining the burst returns 429. The client paces itself at 5 requests per second, retries a 429 with back-off, and reports each one to `onRateLimited` so the job can alert on them.
 
 ## Open
 

@@ -50,6 +50,10 @@ model Space {
 enum RunKind {
   HOURLY
   BACKFILL
+  /// the minutely run: changes since the cursor, then dirty households
+  INCREMENTAL
+  /// a full fetch that seeds or reconciles the mirror, then dirty households
+  SWEEP
 }
 
 enum RunStatus {
@@ -119,6 +123,7 @@ model PlannedWrite {
 
   @@index([runId, status])
   @@index([contactId])
+  @@index([status, updatedAt])
   @@map("planned_write")
 }
 
@@ -140,4 +145,73 @@ model ChangeLogEntry {
   @@index([correlationId])
   @@index([at])
   @@map("change_log_entry")
+}
+
+/// What the household rules need to know about each contact, kept current by
+/// the incremental job (docs/household-match/incremental-design.md). No names
+/// or addresses: the household key is stored only as an HMAC.
+model ContactMirror {
+  spaceKey      String
+  contactId     Int
+  /// Qomon's UpdatedAt, as Qomon returned it
+  updatedAt     String
+  inScope       Boolean
+  /// HMAC of the address key, or "solo:<contact id>" when the contact has no
+  /// usable address (it then forms a household of one)
+  householdHash String
+  presenceRefId Int?
+  presenceValue String?
+  presenceDate  String?
+  markerRefId   Int?
+
+  @@id([spaceKey, contactId])
+  @@index([spaceKey, householdHash])
+  @@map("contact_mirror")
+}
+
+/// Households to plan again. A household leaves this table only once its
+/// writes have settled; failures back off, then quarantine.
+model DirtyHousehold {
+  spaceKey      String
+  householdHash String
+  markedAt      DateTime  @default(now())
+  attempts      Int       @default(0)
+  nextAttemptAt DateTime  @default(now())
+  lastError     String?
+  quarantinedAt DateTime?
+  /// a dry run (no `--apply`) re-plans this household only after this; runs
+  /// that apply ignore it, so inspecting a plan never holds up writing
+  dryRunAfter   DateTime?
+
+  @@id([spaceKey, householdHash])
+  @@index([spaceKey, quarantinedAt, nextAttemptAt])
+  @@map("dirty_household")
+}
+
+/// How far the mirror is current. Moves only after the changes up to it are
+/// in the mirror and their households are marked dirty.
+model SyncCursor {
+  spaceKey   String
+  job        String
+  /// the latest Qomon UpdatedAt ingested
+  cursor     String?
+  ingestedAt DateTime?
+  sweptAt    DateTime?
+  /// fingerprint of what mirror rows are derived from (the household hash
+  /// key, the municipality, and the Presence and marker form ids); a change
+  /// forces a sweep that re-derives every contact
+  keyId      String?
+
+  @@id([spaceKey, job])
+  @@map("sync_cursor")
+}
+
+/// Alerts already posted, so each problem posts once, not every minute.
+model AlertState {
+  spaceKey String
+  alertKey String
+  raisedAt DateTime @default(now())
+
+  @@id([spaceKey, alertKey])
+  @@map("alert_state")
 }

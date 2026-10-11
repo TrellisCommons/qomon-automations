@@ -213,7 +213,8 @@ export class InMemoryQomon implements QomonApi {
   seedContact(contact: QomonContact): QomonContact {
     const id = contact.id ?? nextId();
     const now = new Date().toISOString();
-    const full = { CreatedAt: now, UpdatedAt: now, ...contact, id };
+    // Any change to a contact moves UpdatedAt, as in Qomon.
+    const full = { CreatedAt: now, ...contact, UpdatedAt: now, id };
     this.contacts.set(id, full);
     return structuredClone(full);
   }
@@ -538,6 +539,11 @@ export class InMemoryQomon implements QomonApi {
     };
   }
 
+  /** Test helper: a contact deleted in Qomon simply disappears. */
+  removeContact(id: number): void {
+    this.contacts.delete(id);
+  }
+
   seedForm(type: QomonFormType, form: QomonForm): QomonForm {
     this.forms.set(type, [...(this.forms.get(type) ?? []), form]);
     return structuredClone(form);
@@ -649,11 +655,18 @@ function matchesCondition(
   }
   const actual = readPath(contact, c.attr);
   const present = actual !== undefined && actual !== null && actual !== '';
+  const at = (v: unknown) => Date.parse(String(v ?? ''));
   switch (c.ope) {
     case 'ext':
       return present;
     case 'not_ext':
       return !present;
+    case 'gte':
+      return present && at(actual) >= at(c.value);
+    case 'lte':
+      return present && at(actual) <= at(c.value);
+    case 'range':
+      return present && at(actual) >= at(c.from) && at(actual) <= at(c.to);
     case 'eql':
       return (
         present &&

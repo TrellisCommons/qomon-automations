@@ -128,14 +128,8 @@ export function planHouseholdMatch(
       stats.outsideMunicipality += 1;
       continue;
     }
-    const { kind, presence: current } = classifyPresence(
-      contact,
-      presence,
-      ownWrites,
-    );
-    if (needsRemark(contact, kind, presence)) {
-      remarks.push({ contactId: contact.id, presenceValue: current!.value });
-    }
+    const remark = remarkFor(contact, presence, ownWrites);
+    if (remark) remarks.push(remark);
     const key = householdKeyOf(contact);
     if (key === null) {
       stats.unkeyable += 1;
@@ -149,37 +143,76 @@ export function planHouseholdMatch(
 
   const writes: PlannedHouseholdWrite[] = [];
   for (const members of households.values()) {
-    const withPresence = members.map((c) => ({
-      id: c.id!,
-      ...classifyPresence(c, presence, ownWrites),
-    }));
-    const triggers = withPresence
-      .filter((m) => m.kind === 'canvassed')
-      .map((m) => ({
-        id: m.id,
-        value: m.presence!.value,
-        date: m.presence!.date,
-      }))
-      .sort(byEarliest);
-    const trigger = triggers[0];
-    if (!trigger) continue;
+    const household = planHousehold(members, presence, ownWrites);
+    if (!household.canvassed) continue;
     stats.canvassedHouseholds += 1;
-    for (const member of withPresence) {
-      if (member.kind !== 'none') {
-        if (member.id !== trigger.id) stats.alreadyHavePresence += 1;
-        continue;
-      }
-      writes.push({
-        contactId: member.id,
-        triggerContactId: trigger.id,
-        triggerValue: trigger.value,
-        triggerDate: trigger.date,
-      });
-    }
+    stats.alreadyHavePresence += household.alreadyHavePresence;
+    writes.push(...household.writes);
   }
   writes.sort((a, b) => a.contactId - b.contactId);
   remarks.sort((a, b) => a.contactId - b.contactId);
   stats.planned = writes.length;
   stats.remarks = remarks.length;
   return { writes, remarks, stats };
+}
+
+export interface HouseholdPlan {
+  /** whether the household has a canvass, so rule 2 applies */
+  canvassed: boolean;
+  writes: PlannedHouseholdWrite[];
+  /** members other than the trigger that rule 1 leaves alone */
+  alreadyHavePresence: number;
+}
+
+/** Rule 2 for one household: everyone without a Presence gets the household
+ *  value, triggered by the earliest canvass. */
+export function planHousehold(
+  members: readonly QomonContact[],
+  presence: PresenceConfig,
+  ownWrites: OwnWrites,
+): HouseholdPlan {
+  const withPresence = members.map((c) => ({
+    id: c.id!,
+    ...classifyPresence(c, presence, ownWrites),
+  }));
+  const trigger = withPresence
+    .filter((m) => m.kind === 'canvassed')
+    .map((m) => ({
+      id: m.id,
+      value: m.presence!.value,
+      date: m.presence!.date,
+    }))
+    .sort(byEarliest)[0];
+  if (!trigger) return { canvassed: false, writes: [], alreadyHavePresence: 0 };
+  let alreadyHavePresence = 0;
+  const writes: PlannedHouseholdWrite[] = [];
+  for (const member of withPresence) {
+    if (member.kind !== 'none') {
+      if (member.id !== trigger.id) alreadyHavePresence += 1;
+      continue;
+    }
+    writes.push({
+      contactId: member.id,
+      triggerContactId: trigger.id,
+      triggerValue: trigger.value,
+      triggerDate: trigger.date,
+    });
+  }
+  return { canvassed: true, writes, alreadyHavePresence };
+}
+
+/** A contact whose marker should become the recanvassed value. */
+export function remarkFor(
+  contact: QomonContact,
+  presence: PresenceConfig,
+  ownWrites: OwnWrites,
+): PlannedRemark | null {
+  const { kind, presence: current } = classifyPresence(
+    contact,
+    presence,
+    ownWrites,
+  );
+  return needsRemark(contact, kind, presence)
+    ? { contactId: contact.id!, presenceValue: current!.value }
+    : null;
 }
