@@ -549,6 +549,36 @@ describe('incremental household match', () => {
     expect(hashes.has(before.householdHash)).toBe(false);
   });
 
+  it('prunes old runs that did nothing, and keeps the rest', async () => {
+    await makeSpace(prisma);
+    const old = new Date(Date.now() - 8 * 24 * 3600e3);
+    const quiet = await prisma.jobRun.create({
+      data: {
+        job: 'household-match',
+        spaceKey: 'test-space',
+        kind: 'INCREMENTAL',
+        applying: true,
+        status: 'SUCCEEDED',
+        startedAt: old,
+      },
+    });
+    const failed = await prisma.jobRun.create({
+      data: {
+        job: 'household-match',
+        spaceKey: 'test-space',
+        kind: 'INCREMENTAL',
+        applying: true,
+        status: 'FAILED',
+        startedAt: old,
+      },
+    });
+    await runHouseholdMatch(deps(fake()), incremental('test-space'));
+    const ids = (await prisma.jobRun.findMany()).map((r) => r.id);
+    expect(ids).not.toContain(quiet.id);
+    expect(ids).toContain(failed.id);
+    expect(ids).toHaveLength(2);
+  });
+
   it('measures work lag from when a household became due', async () => {
     await makeSpace(prisma);
     const now = new Date();

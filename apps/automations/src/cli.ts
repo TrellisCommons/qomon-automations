@@ -338,7 +338,12 @@ async function householdMatch(
         : JSON.stringify(
             await healthOf(prisma, values.space, new Date()).catch(() => null),
           );
-    await pingHealthcheck(env, ok, body).catch((err) =>
+    const check = {
+      full: env.HEALTHCHECK_URL,
+      incremental: env.HEALTHCHECK_URL_INCREMENTAL,
+      sweep: env.HEALTHCHECK_URL_SWEEP,
+    }[mode];
+    await pingHealthcheck(check, ok, body).catch((err) =>
       log.warn({ err: String(err) }, 'health check ping failed'),
     );
   }

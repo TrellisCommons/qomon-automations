@@ -76,6 +76,10 @@ const EnvSchema = z.object({
   SLACK_BOT_TOKEN: z.string().optional(),
   SLACK_CHANNEL: z.string().optional(),
   HEALTHCHECK_URL: z.string().url().optional(),
+  /** Separate checks, so the minutely run's pings cannot hide a failed or
+   *  missing sweep or full run. */
+  HEALTHCHECK_URL_INCREMENTAL: z.string().url().optional(),
+  HEALTHCHECK_URL_SWEEP: z.string().url().optional(),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

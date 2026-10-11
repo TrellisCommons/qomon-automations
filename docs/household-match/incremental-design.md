@@ -74,7 +74,9 @@ A post that Slack refuses is not recorded, so the next run tries it again. An er
 
 The quarantine alert is one condition for the space (it posts when the first household is quarantined and clears when none are), not one per household. There is no separate shadow-difference alert: sweep drift is the check that the mirror matches Qomon.
 
-The health check ping carries cursor age, work lag, and the quarantine count, so a dead timer or a silent stall shows up there too.
+The incremental job and the sweep each ping their own health check (`HEALTHCHECK_URL_INCREMENTAL`, `HEALTHCHECK_URL_SWEEP`), so a minutely success never covers for a failed or missing sweep. The ping carries cursor age, work lag, and the quarantine count, so a dead timer or a silent stall shows up there too.
+
+A minutely job writes 1,440 `job_run` rows a day per space. Successful incremental and sweep runs with no planned writes are deleted after 7 days; runs with writes, and failed runs, are kept.
 
 ## Verify before building
 

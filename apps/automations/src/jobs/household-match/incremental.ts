@@ -46,6 +46,9 @@ import type { RunDeps, RunOptions, RunResult, RunStats } from './run.js';
  */
 
 const PAGE = 1000;
+/** A minutely job writes 1,440 runs a day; ones that did nothing are kept
+ *  only this long. Runs with writes, and failed runs, are kept. */
+const QUIET_RUN_RETENTION_MS = 7 * 24 * 3600e3;
 
 export interface IncrementalStats {
   sweep: boolean;
@@ -102,6 +105,15 @@ export async function executeIncremental(
 
   await ingest(ctx);
   if (deps.signal?.aborted) return write.interrupt();
+  await deps.prisma.jobRun.deleteMany({
+    where: {
+      spaceKey: space.key,
+      kind: { in: ['INCREMENTAL', 'SWEEP'] },
+      status: 'SUCCEEDED',
+      startedAt: { lt: new Date(now().getTime() - QUIET_RUN_RETENTION_MS) },
+      writes: { none: {} },
+    },
+  });
 
   // Work: the longest-due dirty households, planned from the mirror. A burst
   // drains over several runs.

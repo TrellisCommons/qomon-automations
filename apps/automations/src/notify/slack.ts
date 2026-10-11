@@ -25,13 +25,13 @@ export async function postSlack(
 
 /** Healthchecks.io-style ping; `/fail` marks the run failed. */
 export async function pingHealthcheck(
-  env: Env,
+  check: string | undefined,
   ok: boolean,
   body?: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<void> {
-  if (!env.HEALTHCHECK_URL) return;
-  const url = env.HEALTHCHECK_URL.replace(/\/$/, '') + (ok ? '' : '/fail');
+  if (!check) return;
+  const url = check.replace(/\/$/, '') + (ok ? '' : '/fail');
   await fetchImpl(url, {
     method: 'POST',
     body,

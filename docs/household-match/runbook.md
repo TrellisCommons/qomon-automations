@@ -113,7 +113,9 @@ For spaces too large to fetch every hour, or to run every minute: see [the incre
 5. **Sweep deletions refused**: a sweep's listing was missing more contacts than `SWEEP_MAX_DELETES`, so none were removed from the mirror. Check in Qomon whether they were really deleted; if so, run one sweep with a higher `SWEEP_MAX_DELETES`.
 6. **Rotating `SPACE_SECRET_KEY`**: the next incremental run notices and sweeps the space to rehash every household. Expect it to take as long as the seed.
 
-The health check ping body is `{ cursorAgeSeconds, workLagSeconds, quarantined }`, which Healthchecks shows with each ping.
+Each schedule pings its own check, so the minutely run's pings cannot hide a failed or missing sweep: `HEALTHCHECK_URL_INCREMENTAL` (period 1 minute, grace a few minutes) and `HEALTHCHECK_URL_SWEEP` (period 1 day). `HEALTHCHECK_URL` stays the full job's. An unset URL means no ping. The incremental and sweep ping body is `{ cursorAgeSeconds, workLagSeconds, quarantined }`, which Healthchecks shows with each ping.
+
+Successful incremental runs that wrote nothing are deleted from `job_run` after 7 days; runs with writes and failed runs are kept.
 
 ## When a breaker trips
 
