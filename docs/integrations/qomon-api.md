@@ -17,7 +17,7 @@ As of 2026-10-07 (sandbox spike, [issue #1](https://github.com/TrellisCommons/qo
 - An upsert with only `id` and Presence leaves every other field alone. `UpdatedAt` changes; `lastchange` does not.
 - The answer's `date` is when Qomon applied the write. A requested `date` or `donedate` is ignored.
 - An API-written answer has no author or channel, and no interaction is created.
-- A value not on the form cannot be added through the API; it is added in the space's Presence settings.
+- A value not on the form cannot be added through the API (as of 2026-10-11). Writing one is accepted (202) and dropped whether the answer names the form by id, by label, or under `forms` instead of `name_presences`, and the form gains no value. `/forms/{id}` and `/v1/forms/type/{type}` allow only `GET`; no `refvalues` path exists. `POST /forms` exists but takes `contact`, `token`, `base_id`, and `slug`, which looks like an online-form submission, not a form definition. Whether Qomon's settings screens can add a Presence value is not known; the four values match the vendor's own example, which suggests a fixed list.
 
 ## Upsert
 
