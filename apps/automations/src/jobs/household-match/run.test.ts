@@ -584,6 +584,27 @@ describe('incremental runs', () => {
     expect(space.changedCursor).toEqual(CURSOR);
   });
 
+  it('prunes old incremental runs that did nothing, and keeps the rest', async () => {
+    await makeSpace(prisma, { changedCursor: CURSOR });
+    const old = (status: 'SUCCEEDED' | 'FAILED') =>
+      prisma.jobRun.create({
+        data: {
+          job: 'household-match',
+          spaceKey: 'test-space',
+          kind: 'INCREMENTAL',
+          applying: true,
+          status,
+          startedAt: new Date('2026-10-01T00:00:00Z'),
+        },
+      });
+    const quiet = await old('SUCCEEDED');
+    const failed = await old('FAILED');
+    await runHouseholdMatch(deps(), { ...incremental, apply: false });
+    const ids = (await prisma.jobRun.findMany()).map((r) => r.id);
+    expect(ids).not.toContain(quiet.id);
+    expect(ids).toContain(failed.id);
+  });
+
   it('plans only over the changed households, not their whole streets', async () => {
     qomon.seedContact({
       firstname: 'Gi',

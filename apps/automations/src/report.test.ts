@@ -68,6 +68,18 @@ describe('shadow report', () => {
     await write(full.id, 104, 'VERIFIED', '2026-10-11T12:59:30Z');
     await write(before.id, 103, 'VERIFIED');
     await write(inc.id, 101, 'PLANNED');
+    // a reason without a knock time counts as missed, not as too close
+    await prisma.plannedWrite.create({
+      data: {
+        runId: full.id,
+        contactId: 105,
+        field: 'presence',
+        valueAfter: 'absent',
+        triggerContactId: 1,
+        reason: 'household of contact 1 (present on 2026-10-11)',
+        status: 'VERIFIED',
+      },
+    });
 
     expect(
       await shadowReport(
@@ -76,7 +88,39 @@ describe('shadow report', () => {
         new Date('2026-10-11T12:00:00Z'),
       ),
     ).toBe(
-      'since 2026-10-11T12:00:00.000Z: full runs wrote 3 household values; incremental runs planned 1, missed 1, and 1 were written before an incremental run could see them\nmissed: 102',
+      'since 2026-10-11T12:00:00.000Z: full runs wrote 4 household values; 1 incremental runs planned 1, missed 2, and 1 were written before an incremental run could see them\nmissed: 102, 105',
     );
+  });
+
+  it('says so when no incremental runs ran, rather than reporting no misses', async () => {
+    await resetDb(prisma);
+    await makeSpace(prisma);
+    const full = await prisma.jobRun.create({
+      data: {
+        job: 'household-match',
+        spaceKey: 'test-space',
+        kind: 'HOURLY',
+        applying: true,
+        startedAt: new Date('2026-10-11T13:00:00Z'),
+      },
+    });
+    await prisma.plannedWrite.create({
+      data: {
+        runId: full.id,
+        contactId: 101,
+        field: 'presence',
+        valueAfter: 'absent',
+        triggerContactId: 1,
+        reason: 'household of contact 1 (present at 2026-10-11T12:10:00Z)',
+        status: 'VERIFIED',
+      },
+    });
+    expect(
+      await shadowReport(
+        prisma,
+        'test-space',
+        new Date('2026-10-11T12:00:00Z'),
+      ),
+    ).toMatch(/no incremental runs, so there is nothing to compare/);
   });
 });

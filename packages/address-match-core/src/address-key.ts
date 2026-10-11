@@ -211,9 +211,11 @@ export function chooseUnit(s: UnitSources): string {
   return unit === 'basement' ? 'bsmt' : unit;
 }
 
-/** Step 5: `unit <unit>, <number> <street>`, or null when there is no
- *  number or no street name. */
-export function addressKey(parts: AddressParts): string | null {
+/** Steps 1 to 4: the unit, number, and street name a key is made of, or
+ *  null when there is no number or no street name. */
+export function addressKeyParts(
+  parts: AddressParts,
+): { unit: string; number: string; name: string } | null {
   const { streetNumber, name: rawName } = takeStreetNumber(
     tidyStreet(parts.street ?? ''),
   );
@@ -232,5 +234,13 @@ export function addressKey(parts: AddressParts): string | null {
   });
   const number = streetNumber || houseNumber;
   if (!number || !name) return null;
-  return (unit ? `unit ${unit}, ` : '') + number + ' ' + name;
+  return { unit, number, name };
+}
+
+/** Step 5: `unit <unit>, <number> <street>`, or null when there is no
+ *  number or no street name. */
+export function addressKey(parts: AddressParts): string | null {
+  const p = addressKeyParts(parts);
+  if (!p) return null;
+  return (p.unit ? `unit ${p.unit}, ` : '') + p.number + ' ' + p.name;
 }

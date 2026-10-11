@@ -6,7 +6,7 @@ import {
   type SearchCondition,
   type SearchQuery,
 } from '@trellis/qomon-client';
-import { householdKeyOf, inMunicipality } from './plan.js';
+import { householdKeyOf, householdNumberOf, inMunicipality } from './plan.js';
 import {
   classifyPresence,
   type OwnWrites,
@@ -93,11 +93,12 @@ export async function fetchContacts(
     if (contact.id !== undefined) byId.set(contact.id, contact);
     if (!inMunicipality(contact, opts.municipality)) continue;
     const key = householdKeyOf(contact);
+    const number = householdNumberOf(contact);
     const stem = streetStem(contact.address?.street ?? '');
-    if (key === null || stem === null) continue;
+    if (key === null || number === null || stem === null) continue;
     households.add(key);
     const numbers = streets.get(stem) ?? new Set<string>();
-    numbers.add(streetNumberOf(key));
+    numbers.add(number);
     streets.set(stem, numbers);
   }
 
@@ -145,11 +146,6 @@ export function streetStem(street: string): string | null {
   const name = street.trim().replace(/^\d+[a-z]?(?:-\d+)?\s+/i, '');
   const stem = /^[\p{L}\p{N}']+/u.exec(name)?.[0];
   return stem && !/^\d+$/.test(stem) ? stem : null;
-}
-
-/** The street number in a household key (`unit 2, 345 example st`). */
-function streetNumberOf(key: string): string {
-  return key.replace(/^unit [^,]*, /, '').split(' ')[0]!;
 }
 
 /**

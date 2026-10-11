@@ -1,4 +1,4 @@
-import { addressKey } from '@trellis/address-match-core';
+import { addressKey, addressKeyParts } from '@trellis/address-match-core';
 import type { QomonContact } from '@trellis/qomon-client';
 import {
   classifyPresence,
@@ -85,13 +85,22 @@ export function inMunicipality(
 }
 
 export function householdKeyOf(contact: QomonContact): string | null {
+  return addressKey(addressPartsOf(contact));
+}
+
+/** The street number in a contact's household key. */
+export function householdNumberOf(contact: QomonContact): string | null {
+  return addressKeyParts(addressPartsOf(contact))?.number ?? null;
+}
+
+function addressPartsOf(contact: QomonContact) {
   const a = contact.address;
-  return addressKey({
+  return {
     house: a?.housenumber,
     door: a?.door,
     line2: a?.addition,
     street: a?.street,
-  });
+  };
 }
 
 function byEarliest(

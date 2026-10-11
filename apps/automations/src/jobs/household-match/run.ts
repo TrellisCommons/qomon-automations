@@ -36,6 +36,10 @@ const VERIFY_POLL_MS = 3_000;
  *  an incremental run never waits, since the next one is a minute away. */
 const LOCK_WAIT_MS = 10 * 60_000;
 const LOCK_POLL_MS = 5_000;
+/** Incremental runs every minute add 1,440 runs a day; ones that succeeded
+ *  without planning a write are kept this long. Longer than a shadow day,
+ *  since `job shadow` counts them. */
+const QUIET_RUN_RETENTION_MS = 7 * 24 * 3600e3;
 
 export interface RunOptions {
   spaceKey: string;
@@ -165,6 +169,7 @@ export async function runHouseholdMatch(
   );
   const stats: Partial<RunStats> = {};
   try {
+    if (opts.incremental) await pruneQuietRuns(deps, space, now());
     const status = await execute(
       deps,
       opts,
@@ -734,6 +739,19 @@ async function repeatsPreviousFailure(
   return (
     previous?.status === 'FAILED' && previous.error === (result.error ?? null)
   );
+}
+
+async function pruneQuietRuns(deps: RunDeps, space: Space, now: Date) {
+  await deps.prisma.jobRun.deleteMany({
+    where: {
+      job: JOB,
+      spaceKey: space.key,
+      kind: 'INCREMENTAL',
+      status: 'SUCCEEDED',
+      startedAt: { lt: new Date(now.getTime() - QUIET_RUN_RETENTION_MS) },
+      writes: { none: {} },
+    },
+  });
 }
 
 function runKindOf(opts: RunOptions): RunKind {

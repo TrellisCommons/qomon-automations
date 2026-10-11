@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { streetQueries, streetStem } from './fetch.js';
+import { householdKeyOf, householdNumberOf } from './plan.js';
 
 describe('streetStem', () => {
   it.each([
@@ -41,5 +42,19 @@ describe('streetQueries', () => {
     // "Street0" is already capitalized, so 30 stems x 2 cases x 2 (with and
     // without the number) = 120 conditions, 50 to a request
     expect(streetQueries(streets)).toHaveLength(3);
+  });
+});
+
+describe('householdNumberOf', () => {
+  it('takes the number from the address, whatever the unit holds', () => {
+    const contact = {
+      id: 1,
+      address: { housenumber: '345', door: 'A, rear', street: 'Example St' },
+    };
+    expect(householdKeyOf(contact)).toBe('unit a,rear, 345 example st');
+    expect(householdNumberOf(contact)).toBe('345');
+    expect(
+      householdNumberOf({ id: 2, address: { street: '12 Demo Ln' } }),
+    ).toBe('12');
   });
 });

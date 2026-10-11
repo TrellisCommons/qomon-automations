@@ -127,7 +127,9 @@ const SEARCH_LAG_MS = 60_000;
  * one. A write counts as missed only when an incremental run started after
  * its trigger's Presence date (plus search lag) and before the full run;
  * otherwise the full run simply got there first. A knock synced long after
- * it was recorded can still read as a miss.
+ * it was recorded can still read as a miss, and so does a write whose knock
+ * time cannot be read from its reason: the report errs toward misses, never
+ * toward a clean result.
  */
 export async function shadowReport(
   prisma: PrismaClient,
@@ -162,11 +164,18 @@ export async function shadowReport(
       })
     ).map((w) => w.contactId),
   );
+  const header = `since ${since.toISOString()}: full runs wrote ${written.length} household values`;
+  // with no incremental runs, every write would read as one they could not
+  // have seen yet
+  if (incremental.length === 0)
+    return `${header}; no incremental runs, so there is nothing to compare. Is the incremental timer running?`;
+
   const missed: number[] = [];
   let tooClose = 0;
   for (const w of written) {
     if (planned.has(w.contactId)) continue;
-    const knock = Date.parse(/ at (\S+)\)$/.exec(w.reason)?.[1] ?? '');
+    const parsed = Date.parse(/ at (\S+)\)$/.exec(w.reason)?.[1] ?? '');
+    const knock = Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed;
     const sawIt = incremental.some(
       (r) =>
         r.startedAt.getTime() >= knock + SEARCH_LAG_MS &&
@@ -177,7 +186,7 @@ export async function shadowReport(
   }
   missed.sort((a, b) => a - b);
   return [
-    `since ${since.toISOString()}: full runs wrote ${written.length} household values; incremental runs planned ${written.length - missed.length - tooClose}, missed ${missed.length}, and ${tooClose} were written before an incremental run could see them`,
+    `${header}; ${incremental.length} incremental runs planned ${written.length - missed.length - tooClose}, missed ${missed.length}, and ${tooClose} were written before an incremental run could see them`,
     ...(missed.length
       ? [
           `missed: ${missed.slice(0, 20).join(', ')}${missed.length > 20 ? ', ...' : ''}`,

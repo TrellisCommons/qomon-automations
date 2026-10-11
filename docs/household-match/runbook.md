@@ -118,7 +118,7 @@ An incremental run (`--incremental`) fetches only contacts changed since the spa
    job shadow --space <space-key> --since <when the shadow started, ISO>
    ```
 
-   A write counts as missed only when an incremental run started after its trigger's knock and before the full run; writes the full run got to first are counted separately. Look up a missed contact id: a housemate whose street starts with a different word is the expected cause, and a knock synced long after it was recorded can also read as a miss.
+   A write counts as missed only when an incremental run started after its trigger's knock and before the full run; writes the full run got to first are counted separately. Look up a missed contact id: a housemate whose street starts with a different word is the expected cause, and a knock synced long after it was recorded can also read as a miss, as can a write whose reason has no knock time (the report errs toward misses). With no incremental runs in the window the report says so instead of reporting none missed: check the incremental timer.
 3. **Switch.** Remove the override, so incremental runs apply:
 
    ```bash
@@ -126,7 +126,7 @@ An incremental run (`--incremental`) fetches only contacts changed since the spa
    systemctl restart qomon-household-match-incremental@<space-key>.timer
    ```
 
-`job status` shows each run's `fetched` line: `full`, or how many contacts changed and how many streets were searched, and why a run fell back to a full fetch. A failed run is not posted again while runs of the same kind keep failing with the same error, so an outage posts once. Incremental runs ping `HEALTHCHECK_URL_INCREMENTAL` (period a minute) and full runs `HEALTHCHECK_URL` (period an hour), each in `/etc/qomon-automations/.env`. A full run waits up to 10 minutes for an incremental run's lock; if it never gets it, it posts to Slack and exits 1.
+`job status` shows each run's `fetched` line: `full`, or how many contacts changed and how many streets were searched, and why a run fell back to a full fetch. A failed run is not posted again while runs of the same kind keep failing with the same error, so an outage posts once. Incremental runs ping `HEALTHCHECK_URL_INCREMENTAL` (period a minute) and full runs `HEALTHCHECK_URL` (period an hour), each in `/etc/qomon-automations/.env`. A full run waits up to 10 minutes for an incremental run's lock; if it never gets it, it posts to Slack and exits 1. Incremental runs that succeeded without planning a write are deleted after 7 days; runs with writes and failed runs are kept.
 
 ## When a breaker trips
 
