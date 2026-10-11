@@ -49,6 +49,8 @@ const PAGE = 1000;
 /** A minutely job writes 1,440 runs a day; ones that did nothing are kept
  *  only this long. Runs with writes, and failed runs, are kept. */
 const QUIET_RUN_RETENTION_MS = 7 * 24 * 3600e3;
+/** Fewer verified writes than this in an hour is never a spike. */
+const WRITE_SPIKE_MIN_PER_HOUR = 200;
 
 export interface IncrementalStats {
   sweep: boolean;
@@ -77,10 +79,12 @@ export interface WritePath {
   ): Promise<void>;
   apply(
     addressUnchanged: (current: QomonContact, contactId: number) => boolean,
+    ownWrites: OwnWrites,
   ): Promise<RunStatus>;
   trip(reason: string): Promise<void>;
   interrupt(): Promise<RunStatus>;
-  ownWrites(): Promise<OwnWrites>;
+  /** the job's verified writes to these contacts */
+  ownWrites(contactIds: number[]): Promise<OwnWrites>;
 }
 
 export interface IncrementalContext {
@@ -121,6 +125,10 @@ export async function executeIncremental(
     spaceKey: space.key,
     quarantinedAt: null,
     nextAttemptAt: { lte: now() },
+    // a dry run skips households another dry run planned recently
+    ...(opts.apply
+      ? {}
+      : { OR: [{ dryRunAfter: null }, { dryRunAfter: { lte: now() } }] }),
   };
   const due = await deps.prisma.dirtyHousehold.findMany({
     where: dueWhere,
@@ -133,7 +141,9 @@ export async function executeIncremental(
     where: dueWhere,
   });
   const members = await membersOf(deps.prisma, space.key, hashes);
-  const ownWrites = await write.ownWrites();
+  const ownWrites = await write.ownWrites(
+    [...members.values()].flat().map((r) => r.contactId),
+  );
 
   const writes: PlannedHouseholdWrite[] = [];
   const remarks: PlannedRemark[] = [];
@@ -189,6 +199,7 @@ export async function executeIncremental(
       : await write.apply(
           (current, id) =>
             householdHashOf(current, space.key, ctx.secret) === hashOf.get(id),
+          ownWrites,
         );
   await settle(ctx, hashes, hashOf);
   return status;
@@ -208,9 +219,16 @@ async function ingest(ctx: IncrementalContext): Promise<void> {
   const previous = cursorRow?.cursor ?? null;
   // Hashes made with another key never match new ones: rehash everything at
   // once rather than split households until the next sweep.
-  const keyId = keyIdOf(secret);
+  const keyId = keyIdOf(secret, {
+    municipality: space.municipality,
+    presenceFormId: presence.form.id,
+    markerFormId: presence.marker.form.id,
+  });
   const rekey = cursorRow !== null && cursorRow.keyId !== keyId;
-  if (rekey) log.warn('household hash key changed; sweeping to rehash');
+  if (rekey)
+    log.warn(
+      'hash key, municipality, or a form changed; sweeping to re-derive the mirror',
+    );
   const sweep = ctx.opts.mode === 'sweep' || previous === null || rekey;
   const since =
     previous === null ? null : new Date(Date.parse(previous) - overlapMs);
@@ -297,21 +315,36 @@ async function ingest(ctx: IncrementalContext): Promise<void> {
     await markDirty(prisma, space.key, [...dirty]);
   };
 
-  for await (const contact of paginateContacts(ctx.qomon, query, {
-    onInvalid: (invalid) => {
-      stats.invalidContacts! += 1;
-      log.warn(
-        { contactId: invalid.id, error: invalid.error },
-        'contact failed validation; set aside',
-      );
-    },
-  })) {
-    stats.changed! += 1;
-    page.push(contact);
-    if (page.length >= PAGE) await flush();
-    if (ctx.deps.signal?.aborted) return;
-  }
-  await flush();
+  const read = new Set<number>();
+  const readAll = async () => {
+    for await (const contact of paginateContacts(ctx.qomon, query, {
+      onInvalid: (invalid) => {
+        stats.invalidContacts! += 1;
+        log.warn(
+          { contactId: invalid.id, error: invalid.error },
+          'contact failed validation; set aside',
+        );
+      },
+    })) {
+      if (contact.id !== undefined) {
+        if (read.has(contact.id)) continue;
+        read.add(contact.id);
+      }
+      stats.changed! += 1;
+      page.push(contact);
+      if (page.length >= PAGE) await flush();
+      if (ctx.deps.signal?.aborted) return;
+    }
+    await flush();
+  };
+  await readAll();
+  // Paging uses live offsets: a contact deleted or edited mid-read shifts
+  // the rest, and one can slip past a page boundary unread. Its change may
+  // be older than the next window, so a delta that took more than one page
+  // reads its window again before the cursor moves; the second pass adds
+  // only contacts the first one missed.
+  if (!sweep && read.size >= PAGE && !ctx.deps.signal?.aborted) await readAll();
+  if (ctx.deps.signal?.aborted) return;
 
   if (seen) {
     // Deleted contacts vanish without notice; only a sweep sees them. Paging
@@ -498,12 +531,17 @@ async function settle(
     );
     if (!pending) done.push(hash);
   }
-  for (let i = 0; i < done.length; i += PAGE) {
-    await deps.prisma.dirtyHousehold.deleteMany({
-      where: {
-        spaceKey: space.key,
-        householdHash: { in: done.slice(i, i + PAGE) },
-      },
+  await deleteDirty(deps.prisma, space.key, done);
+}
+
+async function deleteDirty(
+  prisma: PrismaClient,
+  spaceKey: string,
+  hashes: string[],
+) {
+  for (let i = 0; i < hashes.length; i += PAGE) {
+    await prisma.dirtyHousehold.deleteMany({
+      where: { spaceKey, householdHash: { in: hashes.slice(i, i + PAGE) } },
     });
   }
 }
@@ -512,7 +550,10 @@ async function settle(
  * A run that cannot write settles the households that need nothing and
  * re-plans the rest only after `DRY_RUN_RECHECK_MINUTES`, so a shadow day or
  * a tripped breaker does not re-plan and re-save the same writes every
- * minute. Turning writes back on makes them due at once (`setWritesEnabled`).
+ * minute. A dry run (no `--apply`) sets `dryRunAfter`, which only dry runs
+ * read, so inspecting a plan never delays the applying job. An applying run
+ * blocked by writes being off pushes `nextAttemptAt`; turning writes back on
+ * makes them due at once (`setWritesEnabled`).
  */
 async function defer(
   ctx: IncrementalContext,
@@ -520,30 +561,25 @@ async function defer(
   hashOf: Map<number, string>,
   planned: { contactId: number }[],
 ) {
-  const { deps, space } = ctx;
+  const { deps, space, opts } = ctx;
   const now = deps.now ?? (() => new Date());
   const waiting = new Set(planned.map((w) => hashOf.get(w.contactId)));
-  const done = hashes.filter((h) => !waiting.has(h));
-  for (let i = 0; i < done.length; i += PAGE) {
-    await deps.prisma.dirtyHousehold.deleteMany({
-      where: {
-        spaceKey: space.key,
-        householdHash: { in: done.slice(i, i + PAGE) },
-      },
-    });
-  }
+  await deleteDirty(
+    deps.prisma,
+    space.key,
+    hashes.filter((h) => !waiting.has(h)),
+  );
   const later = hashes.filter((h) => waiting.has(h));
+  const after = new Date(
+    now().getTime() + deps.env.DRY_RUN_RECHECK_MINUTES * 60_000,
+  );
   for (let i = 0; i < later.length; i += PAGE) {
     await deps.prisma.dirtyHousehold.updateMany({
       where: {
         spaceKey: space.key,
         householdHash: { in: later.slice(i, i + PAGE) },
       },
-      data: {
-        nextAttemptAt: new Date(
-          now().getTime() + deps.env.DRY_RUN_RECHECK_MINUTES * 60_000,
-        ),
-      },
+      data: opts.apply ? { nextAttemptAt: after } : { dryRunAfter: after },
     });
   }
 }
@@ -623,8 +659,9 @@ export async function incrementalAlerts(
   const alerts: Alert[] = [];
 
   if (result.status === 'FAILED') {
+    // ids and counts vary between failures of the same kind
     const sig = createHash('sha256')
-      .update(result.error ?? '')
+      .update((result.error ?? '').replace(/\d+/g, '#'))
       .digest('hex')
       .slice(0, 12);
     alerts.push(
@@ -733,11 +770,14 @@ export async function incrementalAlerts(
       updatedAt: { gte: new Date(now.getTime() - 24 * 3600e3) },
     },
   });
-  if (hour > 50 && hour > (5 * day) / 24) {
+  // the hour against the 23 before it, with a floor so draining a backlog
+  // after a quiet day is not a spike
+  const before = (day - hour) / 23;
+  if (hour > Math.max(WRITE_SPIKE_MIN_PER_HOUR, 5 * before)) {
     alerts.push(
       event(
         'write-spike',
-        `${hour} household match writes in the last hour ${where}, several times the daily average`,
+        `${hour} household match writes in the last hour ${where}, over five times the average of the 23 hours before`,
       ),
     );
   }

@@ -250,6 +250,71 @@ describe('incremental household match', () => {
     expect(await prisma.dirtyHousehold.count()).toBe(0);
   });
 
+  it('a manual dry run does not hold up the applying job', async () => {
+    await makeSpace(prisma);
+    const q = fake();
+    q.seedContact({ id: 1, address: { city: 'Testville', ...ADDRESSES[0]! } });
+    q.seedContact({ id: 2, address: { city: 'Testville', ...ADDRESSES[0]! } });
+    await canvass(q, 1, 'present');
+    q.flushUpserts();
+    const look = await runHouseholdMatch(deps(q), {
+      ...incremental('test-space'),
+      apply: false,
+    });
+    expect(look).toMatchObject({ applying: false, stats: { planned: 1 } });
+    const row = await prisma.dirtyHousehold.findFirstOrThrow();
+    expect(row.nextAttemptAt.getTime()).toBeLessThanOrEqual(Date.now());
+    expect(row.dryRunAfter!.getTime()).toBeGreaterThan(Date.now());
+
+    // another dry run skips it; the applying run writes it at once
+    const lookAgain = await runHouseholdMatch(deps(q), {
+      ...incremental('test-space'),
+      apply: false,
+    });
+    expect(lookAgain).toMatchObject({ stats: { households: 0 } });
+    const write = await runHouseholdMatch(deps(q), incremental('test-space'));
+    expect(write).toMatchObject({ applying: true, stats: { verified: 1 } });
+  });
+
+  it('a Qomon error on one contact fails its write; errors on several in a row fail the run', async () => {
+    await makeSpace(prisma);
+    const q = fake();
+    for (const id of [1, 2, 3, 4, 5])
+      q.seedContact({ id, address: { city: 'Testville', ...ADDRESSES[0]! } });
+    await canvass(q, 1, 'present');
+    q.flushUpserts();
+    const failing = (bad: (id: number) => boolean) =>
+      withOverrides(q, {
+        getContact: async (id: number) => {
+          if (bad(id)) throw new Error(`Qomon GET /contacts/${id}: 502`);
+          return q.getContact(id);
+        },
+      });
+
+    const outage = await runHouseholdMatch(
+      deps(failing(() => true)),
+      incremental('test-space'),
+    );
+    expect(outage).toMatchObject({ status: 'FAILED' });
+    // an outage is not the household's fault
+    expect(await prisma.dirtyHousehold.findFirstOrThrow()).toMatchObject({
+      attempts: 0,
+    });
+
+    const one = await runHouseholdMatch(
+      deps(failing((id) => id === 2)),
+      incremental('test-space'),
+    );
+    expect(one).toMatchObject({
+      status: 'SUCCEEDED',
+      stats: { failed: 1, verified: 3 },
+    });
+    expect(await prisma.dirtyHousehold.findFirstOrThrow()).toMatchObject({
+      attempts: 1,
+      lastError: 're-read failed: Qomon GET /contacts/2: 502',
+    });
+  });
+
   it('takes a capped number of households per run, so a burst drains instead of tripping', async () => {
     await makeSpace(prisma);
     const q = fake();
@@ -547,6 +612,57 @@ describe('incremental household match', () => {
     );
     expect(hashes.size).toBe(1);
     expect(hashes.has(before.householdHash)).toBe(false);
+  });
+
+  it('re-derives the mirror when the municipality changes', async () => {
+    await makeSpace(prisma);
+    const q = fake();
+    q.seedContact({ id: 1, address: { city: 'Testville', ...ADDRESSES[0]! } });
+    await runHouseholdMatch(deps(q), incremental('test-space'));
+    expect(await prisma.contactMirror.findFirstOrThrow()).toMatchObject({
+      inScope: true,
+    });
+
+    await prisma.space.update({
+      where: { key: 'test-space' },
+      data: { municipality: 'Otherville' },
+    });
+    const result = await runHouseholdMatch(deps(q), incremental('test-space'));
+    expect(result).toMatchObject({ stats: { sweep: true } });
+    expect(await prisma.contactMirror.findFirstOrThrow()).toMatchObject({
+      inScope: false,
+    });
+  });
+
+  it('reads a delta of more than one page twice, so a contact pushed past a page boundary is not lost', async () => {
+    await makeSpace(prisma);
+    const q = fake();
+    q.seedContact({ id: 1, address: { city: 'Testville', ...ADDRESSES[0]! } });
+    await runHouseholdMatch(deps(q), incremental('test-space'));
+    for (let id = 2; id <= 1002; id += 1)
+      q.seedContact({ id, address: { city: 'Testville', ...ADDRESSES[3]! } });
+
+    let firstPass = true;
+    const shifting = withOverrides(q, {
+      searchContacts: async (params) => {
+        const page = await q.searchContacts(params);
+        if (!JSON.stringify(params.query).includes('UpdatedAt')) return page;
+        // the last contact slips past the boundary on the first pass only
+        if (firstPass && (params.page ?? 0) === 1) {
+          firstPass = false;
+          return page.filter((c) => c.id !== 1002);
+        }
+        return page;
+      },
+    });
+    await runHouseholdMatch(deps(shifting), incremental('test-space'));
+    expect(
+      await prisma.contactMirror.findUnique({
+        where: {
+          spaceKey_contactId: { spaceKey: 'test-space', contactId: 1002 },
+        },
+      }),
+    ).not.toBeNull();
   });
 
   it('prunes old runs that did nothing, and keeps the rest', async () => {

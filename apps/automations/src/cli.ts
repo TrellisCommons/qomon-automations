@@ -49,7 +49,8 @@ const USAGE = `Usage: pnpm job <command> [options]
 `;
 
 /** Exit codes: 0 done (or nothing to do), 1 failed, 2 a circuit breaker
- *  tripped, 3 interrupted (safe to run again). */
+ *  tripped, 3 interrupted (safe to run again), 4 a sweep skipped because
+ *  another run held the lock. */
 function exitCodeFor(result: RunResult, mode?: string): number {
   if (result.status === 'FAILED') return 1;
   // a skipped sweep must not ping the health check as healthy
@@ -138,16 +139,22 @@ async function main(argv: string[]): Promise<number> {
         return await householdMatch(env, prisma, values);
       case 'release': {
         const spaceKey = required(values.space, '--space');
-        const target = values.household
-          ? { householdHash: values.household }
-          : {
-              contactId: Number(
-                required(values.contact, '--contact or --household'),
-              ),
-            };
+        let target: { householdHash: string } | { contactId: number };
+        if (values.household) target = { householdHash: values.household };
+        else {
+          const contactId = Number(
+            required(values.contact, '--contact or --household'),
+          );
+          if (!Number.isInteger(contactId) || contactId <= 0)
+            throw new UsageError('--contact must be a positive integer');
+          target = { contactId };
+        }
         const hash = await releaseHousehold(prisma, spaceKey, target);
         console.log(
-          hash ? `released household ${hash}` : 'no such dirty household',
+          hash
+            ? `released household ${hash}`
+            : // a contact that moved since resolves to its new household
+              'no such dirty household; if the contact moved, release by --household (from `dirty_household`)',
         );
         return hash ? 0 : 1;
       }

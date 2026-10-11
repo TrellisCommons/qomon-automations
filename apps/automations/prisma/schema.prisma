@@ -123,6 +123,7 @@ model PlannedWrite {
 
   @@index([runId, status])
   @@index([contactId])
+  @@index([status, updatedAt])
   @@map("planned_write")
 }
 
@@ -178,6 +179,9 @@ model DirtyHousehold {
   nextAttemptAt DateTime  @default(now())
   lastError     String?
   quarantinedAt DateTime?
+  /// a dry run (no `--apply`) re-plans this household only after this; runs
+  /// that apply ignore it, so inspecting a plan never holds up writing
+  dryRunAfter   DateTime?
 
   @@id([spaceKey, householdHash])
   @@index([spaceKey, quarantinedAt, nextAttemptAt])
@@ -193,8 +197,9 @@ model SyncCursor {
   cursor     String?
   ingestedAt DateTime?
   sweptAt    DateTime?
-  /// fingerprint of the key household hashes were made with; a change
-  /// forces a sweep that rehashes every contact
+  /// fingerprint of what mirror rows are derived from (the household hash
+  /// key, the municipality, and the Presence and marker form ids); a change
+  /// forces a sweep that re-derives every contact
   keyId      String?
 
   @@id([spaceKey, job])

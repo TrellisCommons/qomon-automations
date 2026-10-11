@@ -90,6 +90,7 @@ Each run posts to Slack only when something went wrong: a write failed, the run 
 | 1 | the run failed (Slack has the error) |
 | 2 | a circuit breaker tripped; for an hourly run the space's writes are now off |
 | 3 | interrupted by a signal; safe to run again |
+| 4 | a sweep was skipped: another run held the lock for 15 minutes |
 | 64 | bad command line |
 
 ## Incremental job

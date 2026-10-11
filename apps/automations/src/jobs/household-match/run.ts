@@ -43,6 +43,7 @@ const BATCH_SIZE = 20;
 /** PlannedWrite.field of a marker change; household values are 'presence' */
 const REMARK_FIELD = 'presence_source';
 const VERIFY_POLL_MS = 3_000;
+const ERRORS_IN_A_ROW_FAIL_RUN = 3;
 
 export interface RunOptions {
   spaceKey: string;
@@ -248,7 +249,7 @@ async function execute(
       write: {
         persistPlan: (writes, remarks) =>
           persistPlan(deps, run, presence, writes, remarks),
-        apply: (addressUnchanged) =>
+        apply: (addressUnchanged, ownWrites) =>
           applyAndVerify(
             deps,
             qomon,
@@ -256,12 +257,15 @@ async function execute(
             run,
             presence,
             addressUnchanged,
+            ownWrites,
             stats,
             log,
+            { failWriteOnError: true },
           ),
         trip: (reason) => trip(deps, space, reason, log),
         interrupt: () => interrupt(deps, run, log),
-        ownWrites: () => loadOwnWrites(deps.prisma, space.key),
+        ownWrites: (contactIds) =>
+          loadOwnWrites(deps.prisma, space.key, contactIds),
       },
     });
   }
@@ -323,6 +327,7 @@ async function execute(
     run,
     presence,
     (current, id) => householdKeyOf(current) === keys.get(id),
+    ownWrites,
     stats,
     log,
   );
@@ -370,10 +375,22 @@ async function applyAndVerify(
   run: JobRun,
   presence: PresenceConfig,
   addressUnchanged: (current: QomonContact, contactId: number) => boolean,
+  ownWrites: OwnWrites,
   stats: Partial<RunStats>,
   log: Logger,
+  /** An incremental run fails one write on a Qomon error, so its household
+   *  backs off and quarantines; a full run fails and runs again next hour. */
+  { failWriteOnError = false }: { failWriteOnError?: boolean } = {},
 ): Promise<RunStatus> {
-  const ownWrites = await loadOwnWrites(deps.prisma, space.key);
+  // Errors on several contacts in a row are Qomon failing, not a contact:
+  // fail the run, so an outage stalls and alerts instead of quarantining
+  // every household it touches.
+  let errorsInARow = 0;
+  const contactError = (err: unknown) => {
+    errorsInARow += 1;
+    if (!failWriteOnError || errorsInARow >= ERRORS_IN_A_ROW_FAIL_RUN)
+      throw err;
+  };
   const sleep =
     deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const now = deps.now ?? (() => new Date());
@@ -409,6 +426,7 @@ async function applyAndVerify(
       let current;
       try {
         current = await qomon.getContact(write.contactId);
+        errorsInARow = 0;
       } catch (err) {
         // One malformed contact fails its own write, not the run, so its
         // household can back off and quarantine like any other failure.
@@ -417,7 +435,12 @@ async function applyAndVerify(
           counts.failed += 1;
           continue;
         }
-        if (!(err instanceof QomonNotFoundError)) throw err;
+        if (!(err instanceof QomonNotFoundError)) {
+          contactError(err);
+          await mark(write.id, 'FAILED', `re-read failed: ${errorText(err)}`);
+          counts.failed += 1;
+          continue;
+        }
         await mark(write.id, 'SKIPPED', 'contact no longer exists');
         counts.skipped += 1;
         continue;
@@ -517,7 +540,17 @@ async function applyAndVerify(
     const deadline = now().getTime() + deps.env.VERIFY_TIMEOUT_SECONDS * 1000;
     while (pending.size > 0) {
       for (const write of [...pending.values()]) {
-        const seen = await readBack(qomon, write, presence);
+        let seen: ReadBack;
+        try {
+          seen = await readBack(qomon, write, presence);
+          errorsInARow = 0;
+        } catch (err) {
+          contactError(err);
+          pending.delete(write.id);
+          await mark(write.id, 'FAILED', `read-back failed: ${errorText(err)}`);
+          counts.failed += 1;
+          continue;
+        }
         if (seen.state === 'pending') continue;
         pending.delete(write.id);
         if (seen.state === 'verified') {
@@ -789,18 +822,38 @@ export async function loadPresenceConfig(
   );
 }
 
-/** Contacts this job wrote and verified in the space, with the Presence date
- *  each write got (see `classifyPresence`). */
+/** Contacts this job wrote and verified in the space (or, given ids, just
+ *  those), with the Presence date each write got (see `classifyPresence`). */
 async function loadOwnWrites(
   prisma: PrismaClient,
   spaceKey: string,
+  contactIds?: number[],
 ): Promise<OwnWrites> {
-  const rows = await prisma.plannedWrite.findMany({
-    where: { status: 'VERIFIED', field: 'presence', run: { spaceKey } },
-    select: { contactId: true, writtenPresenceDate: true },
-    orderBy: { updatedAt: 'asc' },
-  });
-  return new Map(rows.map((r) => [r.contactId, r.writtenPresenceDate]));
+  const own = new Map<number, string | null>();
+  const chunks =
+    contactIds === undefined
+      ? [undefined]
+      : Array.from({ length: Math.ceil(contactIds.length / 1000) }, (_, i) =>
+          contactIds.slice(i * 1000, (i + 1) * 1000),
+        );
+  for (const ids of chunks) {
+    const rows = await prisma.plannedWrite.findMany({
+      where: {
+        status: 'VERIFIED',
+        field: 'presence',
+        run: { spaceKey },
+        ...(ids ? { contactId: { in: ids } } : {}),
+      },
+      select: { contactId: true, writtenPresenceDate: true },
+      orderBy: { updatedAt: 'asc' },
+    });
+    for (const r of rows) own.set(r.contactId, r.writtenPresenceDate);
+  }
+  return own;
+}
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 type ReadBack =

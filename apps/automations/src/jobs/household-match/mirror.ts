@@ -34,9 +34,25 @@ export function householdHashOf(
 }
 
 /** Identifies the key hashes were made with, without revealing it. */
-export function keyIdOf(secret: Buffer): string {
+/** Changes whenever a mirror row would be derived differently: another
+ *  hash key, municipality, or Presence or marker form. */
+export function keyIdOf(
+  secret: Buffer,
+  derivedFrom: {
+    municipality: string | null;
+    presenceFormId: number;
+    markerFormId: number;
+  },
+): string {
   return createHmac('sha256', secret)
     .update('household-hash-key-id')
+    .update(
+      JSON.stringify([
+        derivedFrom.municipality,
+        derivedFrom.presenceFormId,
+        derivedFrom.markerFormId,
+      ]),
+    )
     .digest('hex')
     .slice(0, 16);
 }
