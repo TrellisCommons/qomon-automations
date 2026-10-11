@@ -107,6 +107,16 @@ export interface SearchContactsParams {
   page?: number;
   sortAttr?: SearchSortAttr;
   sortAsc?: boolean;
+  /** Called for each contact in the page that fails validation. Such
+   *  contacts are left out instead of failing the whole page, so one
+   *  malformed record cannot stop every sweep that includes it. */
+  onInvalid?: (invalid: InvalidContact) => void;
+}
+
+export interface InvalidContact {
+  /** the contact's id, when the record has a readable one */
+  id: number | null;
+  error: string;
 }
 
 /**

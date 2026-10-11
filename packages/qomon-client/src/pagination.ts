@@ -57,6 +57,8 @@ export interface PaginateContactsOptions {
   maxPages?: number;
   sortAttr?: SearchContactsParams['sortAttr'];
   sortAsc?: boolean;
+  /** see SearchContactsParams.onInvalid */
+  onInvalid?: SearchContactsParams['onInvalid'];
 }
 
 /**
@@ -75,12 +77,17 @@ export async function* paginateContacts(
   const seen = new Set<number>();
 
   for (let page = 0; page < maxPages; page += 1) {
+    let setAside = 0;
     const contacts = await api.searchContacts({
       query,
       perPage: pageSize,
       page,
       sortAttr: options.sortAttr,
       sortAsc: options.sortAsc,
+      onInvalid: (invalid) => {
+        setAside += 1;
+        options.onInvalid?.(invalid);
+      },
     });
     for (const contact of contacts) {
       if (contact.id !== undefined) {
@@ -89,7 +96,9 @@ export async function* paginateContacts(
       }
       yield contact;
     }
-    if (contacts.length < pageSize) return;
+    // a contact set aside still counts toward the page Qomon returned, or a
+    // malformed record would end the sweep early
+    if (contacts.length + setAside < pageSize) return;
   }
 }
 

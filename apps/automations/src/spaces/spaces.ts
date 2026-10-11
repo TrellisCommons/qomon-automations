@@ -31,11 +31,17 @@ export async function getSpace(
   return space;
 }
 
-export function qomonFor(space: Space, env: Env, secretKey: Buffer): QomonApi {
+export function qomonFor(
+  space: Space,
+  env: Env,
+  secretKey: Buffer,
+  onRateLimited?: () => void,
+): QomonApi {
   return new QomonClient({
     apiKey: decryptSecret(space.qomonApiKeyEncrypted, secretKey),
     baseUrl: space.qomonApiBase ?? env.QOMON_API_BASE,
     rps: env.QOMON_RPS,
+    onRateLimited,
   });
 }
 

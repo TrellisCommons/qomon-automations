@@ -22,6 +22,8 @@ export interface QomonHttpOptions {
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
   timeoutMs?: number;
+  /** Called on every 429, before the backoff retries the request. */
+  onRateLimited?: () => void;
 }
 
 export interface RequestOptions<T extends z.ZodTypeAny> {
@@ -48,6 +50,7 @@ export class QomonHttp {
   private readonly backoffMaxMs: number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly timeoutMs: number;
+  private readonly onRateLimited?: () => void;
 
   constructor(opts: QomonHttpOptions) {
     if (!opts.apiKey) throw new Error('QomonHttp requires an apiKey');
@@ -59,6 +62,7 @@ export class QomonHttp {
     this.backoffMaxMs = opts.backoffMaxMs ?? 15_000;
     this.sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.timeoutMs = opts.timeoutMs ?? 30_000;
+    this.onRateLimited = opts.onRateLimited;
     this.limiter = new RateLimiter({
       rps: opts.rps ?? 5,
       concurrency: opts.concurrency,
@@ -113,6 +117,7 @@ export class QomonHttp {
 
           if (!res.ok) {
             if (res.status === 429) {
+              this.onRateLimited?.();
               const retryAfter = parseRetryAfter(
                 res.headers.get('retry-after'),
               );

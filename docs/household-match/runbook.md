@@ -92,6 +92,26 @@ Each run posts to Slack only when something went wrong: a write failed, the run 
 | 3 | interrupted by a signal; safe to run again |
 | 64 | bad command line |
 
+## Incremental job
+
+For spaces too large to fetch every hour, or to run every minute: see [the incremental design](incremental-design.md). **Check first** that a Presence recorded in the canvassing app moves the contact's `UpdatedAt`; if it does not, this job misses knocks until the nightly sweep.
+
+1. **Seed** the mirror with a dry-run sweep (`job household-match --space <space-key> --sweep`). The first run would sweep anyway; doing it by hand shows how long it takes. Every household it reads starts dirty.
+2. **Shadow** for a day: enable the minutely timer with `--apply` removed from `ExecStart` (a dry run), alongside the hourly full job.
+3. **Switch**: disable the hourly timer, restore `--apply`, and enable both:
+
+   ```bash
+   cp deploy/systemd/qomon-household-match-{incremental,sweep}@.{service,timer} /etc/systemd/system/
+   systemctl daemon-reload
+   systemctl disable --now qomon-household-match@<space-key>.timer
+   systemctl enable --now qomon-household-match-incremental@<space-key>.timer qomon-household-match-sweep@<space-key>.timer
+   ```
+
+   The sweep and the minutely run share the job's lock: a tick during a sweep exits at once.
+4. **Quarantined households**: the alert names none; find them with `select "householdHash", attempts, "lastError" from dirty_household where "quarantinedAt" is not null`, look at the cause, then `job release --space <space-key> --household <hash>` (or `--contact <id>`).
+
+The health check ping body is `{ cursorAgeSeconds, workLagSeconds, quarantined }`, which Healthchecks shows with each ping.
+
 ## When a breaker trips
 
 1. Read the run: `job report --run <run id> --out /root/run.csv` and `journalctl`. `FAILED` rows say why (`not visible after 120s`, `a different Presence was recorded`).

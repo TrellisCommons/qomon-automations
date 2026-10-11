@@ -3,9 +3,9 @@ last-reviewed: 2026-10-11
 review-interval-days: 30
 ---
 
-# Household match: incremental design (proposed)
+# Household match: incremental design
 
-Status: **proposed, not built.** The current job ([design](design.md)) fetches the whole space every run, which takes about 1 second per 1,000 contacts. A 500,000-contact space would take 8 to 9 minutes and about 500 requests per run, so it cannot run every minute: the run outlasts the interval and the requests alone use most of Qomon's rate limit (a burst of 100, refilling at 10 per second; see the [Qomon API notes](../integrations/qomon-api.md)). This design processes only what changed. The run rules, the write path, and the guards are unchanged.
+Status: **built, not yet in use.** `household-match --incremental` and `--sweep` implement this design alongside the full job; how to run them is in [the runbook](runbook.md#incremental-job). The full job ([design](design.md)) fetches the whole space every run, which takes about 1 second per 1,000 contacts. A 500,000-contact space would take 8 to 9 minutes and about 500 requests per run, so it cannot run every minute: the run outlasts the interval and the requests alone use most of Qomon's rate limit (a burst of 100, refilling at 10 per second; see the [Qomon API notes](../integrations/qomon-api.md)). This design processes only what changed. The run rules, the write path, and the guards are unchanged.
 
 ## Shape
 
@@ -21,7 +21,7 @@ flowchart LR
 
 Each run has two phases with separate progress.
 
-1. **Ingest.** Search `UpdatedAt >= cursor - overlap`, update those contacts' mirror rows, and mark their old and new household keys dirty (a contact who moved affects both addresses). The mirror rows, the dirty marks, and the new cursor commit in **one transaction**, so the cursor means "the mirror is current up to here" and never waits on a write.
+1. **Ingest.** Search `UpdatedAt >= cursor - overlap`, update those contacts' mirror rows, and mark their old and new household keys dirty (a contact who moved affects both addresses), 1,000 contacts at a time. The cursor is written **last**, after every page is in the mirror and its households are marked, so it means "the mirror is current up to here" and never waits on a write. A run that dies part-way re-reads the same window next time; mirror updates and dirty marks are idempotent. The first run, or `--sweep`, reads every contact instead, sets the cursor to when the sweep started, and removes mirror rows for contacts Qomon no longer has.
 2. **Work.** Take dirty households that are due, plan each from the mirror with the existing rules, and apply through the existing path: re-read before writing, change log, upsert, verify. A household leaves the dirty table only when its writes have settled.
 
 The job's own writes bump `UpdatedAt`, so they come back through the next ingest and keep the mirror honest.
@@ -31,8 +31,11 @@ The job's own writes bump `UpdatedAt`, so they come back through the next ingest
 | Table | Holds |
 |---|---|
 | `contact_mirror` | per contact: id, `UpdatedAt`, in-municipality flag, household key as an HMAC with `SPACE_SECRET_KEY` (no address is stored), Presence refvalue and date, marker value |
-| `dirty_household` | household HMAC, `attempts`, `nextAttemptAt`, `lastError`, `quarantinedAt` |
-| `sync_cursor` | per space and job: the cursor, and when it last moved |
+| `dirty_household` | household HMAC, `markedAt`, `attempts`, `nextAttemptAt`, `lastError`, `quarantinedAt` |
+| `sync_cursor` | per space and job: the cursor (the newest `UpdatedAt` ingested), when ingest last completed, when the last sweep ran |
+| `alert_state` | alerts already posted, so each posts once |
+
+A contact with no usable address is a household of one (`solo:<contact id>`), so a marker on it can still be re-marked.
 
 ## Scheduling
 
@@ -43,13 +46,13 @@ On Kubernetes the equivalent is a CronJob with `concurrencyPolicy: Forbid`, `sta
 ## Failure handling
 
 - **One contact never sinks a run.** Anything specific to a contact is recorded and the run moves on: a 404, a validation error, a verification timeout, and a contact that fails to parse. The client validates search results contact by contact, setting malformed ones aside with their id and error, instead of failing the whole page. Only failures of the whole system fail a run (authentication, repeated 5xx after retries, the database), and those should stall and alert.
-- **Back-off, then quarantine.** A household whose processing fails gets exponential back-off (1, 2, 4 minutes and so on) while others keep flowing. After 5 attempts it is quarantined: never retried automatically, alerted once, and released by a person with `job release`.
+- **Back-off, then quarantine.** A household with a failed write gets exponential back-off (1, 2, 4 minutes and so on) while others keep flowing. After `QUARANTINE_AFTER_ATTEMPTS` (5) it is quarantined: never retried automatically, alerted, and released by a person with `job release --space <key> --contact <id>` (or `--household <hash>`). A household whose writes were cut short by a stop stays dirty without counting as a failure.
 - **Nightly reconciliation sweep.** A full sweep through the same ingest catches what `UpdatedAt` cannot: deleted contacts (they vanish without notice) and any change that does not bump `UpdatedAt`. Anything that differs from the mirror is marked dirty.
 - **The circuit breakers stay**, as sanity limits rather than throttles (see Alerts).
 
 ## Alerts
 
-Slack hears only about failures and anomalies (as in the current job), each **once per problem**: when it starts, and once when it clears. A problem that persists does not post every minute.
+Slack hears only about failures and anomalies (as in the current job), each **once per problem** (`src/alerts.ts`). A *condition* posts when it starts and once when it clears. An *event* posts when it happens, then stays quiet for a cooldown even if it recurs.
 
 | Alert | Fires when | Why |
 |---|---|---|
@@ -63,7 +66,10 @@ Slack hears only about failures and anomalies (as in the current job), each **on
 | Write spike | writes in the last hour are several times the trailing daily average | a feedback loop, or a bulk change upstream |
 | Rate limiting | Qomon returned 429s in a run | the pace or another client is using up the shared limit |
 | Sweep drift | the nightly sweep finds more than a handful of contacts the minutely ingest missed | `UpdatedAt` is not catching some kind of change; the incremental job is not trustworthy until explained |
-| Shadow difference | during rollout, the incremental and full planners disagree | see Rollout |
+| Writes off | the environment and the run would write, but the space's writes are off (a condition) | runs only plan until a person turns writes back on |
+| Invalid contacts | contacts failed validation and were set aside | a malformed record; ids are in the logs |
+
+The quarantine alert is one condition for the space (it posts when the first household is quarantined and clears when none are), not one per household. There is no separate shadow-difference alert: sweep drift is the check that the mirror matches Qomon.
 
 The health check ping carries cursor age, work lag, and the quarantine count, so a dead timer or a silent stall shows up there too.
 
@@ -78,9 +84,10 @@ The health check ping carries cursor age, work lag, and the quarantine count, so
 
 ## Proving it matches the current job
 
-- **Property test:** random sequences of knocks, re-records, moves, new contacts, and deletions against the fake. After each step, the incremental planner's writes must equal the full planner's.
-- **Shadow rollout:** the incremental job runs every minute as a dry run while the hourly job keeps writing. Any plan difference alerts. Switch over after a clean day.
+- **Equivalence test** (`incremental.test.ts`): two fakes receive the same random history of new contacts, knocks, re-records, moves, and deletions. After every step the full job runs against one and the incremental job (a sweep after a deletion, as in production) against the other, and every contact's Presence and marker must match. It runs 12 histories in CI; 80 passed locally.
+- **Shadow rollout:** run the incremental job every minute as a **dry run** while the hourly full job keeps writing. A dry run plans but leaves households dirty, so its planned writes can be compared with the hourly runs'; watch the sweep drift alert for a day before switching.
 
-## Cost
+## Known limits
 
-About two days of building and testing, plus the app check in "Verify before building". The per-contact parsing change is worth making to the current job regardless: one malformed contact would fail every hourly run today.
+- **A deleted contact can trigger writes until the next sweep.** The mirror keeps a deleted canvassed contact until a sweep removes it, so its housemates can be written in the meantime; the full job would not write them. The re-read before every write still protects the housemates' own Presence.
+- **A change to the space's municipality** makes the next sweep report every contact it moves in or out of scope as drift.

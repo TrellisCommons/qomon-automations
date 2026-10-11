@@ -27,9 +27,14 @@ export async function postSlack(
 export async function pingHealthcheck(
   env: Env,
   ok: boolean,
+  body?: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<void> {
   if (!env.HEALTHCHECK_URL) return;
   const url = env.HEALTHCHECK_URL.replace(/\/$/, '') + (ok ? '' : '/fail');
-  await fetchImpl(url, { method: 'POST', signal: AbortSignal.timeout(10_000) });
+  await fetchImpl(url, {
+    method: 'POST',
+    body,
+    signal: AbortSignal.timeout(10_000),
+  });
 }

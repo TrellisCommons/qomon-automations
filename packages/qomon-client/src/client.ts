@@ -226,9 +226,24 @@ export class QomonClient implements QomonApi {
           },
         },
       },
-      schema: z.object({ contacts: z.array(QomonContact).nullish() }),
+      schema: z.object({ contacts: z.array(z.unknown()).nullish() }),
     });
-    return res.data.contacts ?? [];
+    const contacts: QomonContact[] = [];
+    for (const raw of res.data.contacts ?? []) {
+      const parsed = QomonContact.safeParse(raw);
+      if (parsed.success) {
+        contacts.push(parsed.data);
+      } else {
+        const id = (raw as { id?: unknown } | null)?.id;
+        params.onInvalid?.({
+          id: typeof id === 'number' ? id : null,
+          error: parsed.error.issues
+            .map((i) => `${i.path.join('.')}: ${i.message}`)
+            .join('; '),
+        });
+      }
+    }
+    return contacts;
   }
 
   async listFormsByType(type: QomonFormType): Promise<QomonForm[]> {

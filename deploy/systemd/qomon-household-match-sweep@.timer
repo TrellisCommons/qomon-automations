@@ -1,0 +1,9 @@
+[Unit]
+Description=Nightly Qomon household match sweep (%i)
+
+[Timer]
+OnCalendar=*-*-* 03:17:00 America/Toronto
+Persistent=true
+
+[Install]
+WantedBy=timers.target

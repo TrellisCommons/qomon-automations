@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { withBackoff } from './backoff.js';
+import { QomonClient } from './client.js';
+import { collectContacts } from './pagination.js';
 import { RateLimiter } from './throttle.js';
 import {
   QomonAuthError,
@@ -232,5 +234,79 @@ describe('mergeContact', () => {
       firstname: 'B',
       address: { city: 'X' },
     });
+  });
+});
+
+describe('QomonClient.searchContacts', () => {
+  const page = (contacts: unknown[]) =>
+    new Response(JSON.stringify({ status: 'success', data: { contacts } }), {
+      status: 200,
+    });
+
+  it('sets aside a malformed contact instead of failing the page', async () => {
+    const client = new QomonClient({
+      apiKey: 'k',
+      fetchImpl: async () =>
+        page([
+          { id: 1, surname: 'Ok' },
+          { id: 2, formdatas: 'not a list' },
+          { id: 3 },
+        ]),
+    });
+    const invalid: Array<{ id: number | null }> = [];
+    const contacts = await client.searchContacts({
+      query: { $all: [] },
+      onInvalid: (i) => invalid.push(i),
+    });
+    expect(contacts.map((c) => c.id)).toEqual([1, 3]);
+    expect(invalid).toEqual([
+      { id: 2, error: expect.stringContaining('formdatas') },
+    ]);
+  });
+
+  it('reports each 429 before retrying', async () => {
+    let calls = 0;
+    let limited = 0;
+    const client = new QomonClient({
+      apiKey: 'k',
+      sleep: async () => {},
+      onRateLimited: () => (limited += 1),
+      fetchImpl: async () => {
+        calls += 1;
+        return calls === 1
+          ? new Response('', { status: 429, headers: { 'retry-after': '0' } })
+          : page([]);
+      },
+    });
+    await client.searchContacts({ query: { $all: [] } });
+    expect(limited).toBe(1);
+  });
+});
+
+describe('paginateContacts', () => {
+  it('keeps paging past a full page that had a contact set aside', async () => {
+    const pages = [
+      [{ id: 1 }, { id: 2, formdatas: 'bad' }],
+      [{ id: 3 }, { id: 4 }],
+      [{ id: 5 }],
+    ];
+    let call = 0;
+    const client = new QomonClient({
+      apiKey: 'k',
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            status: 'success',
+            data: { contacts: pages[call++] ?? [] },
+          }),
+          {
+            status: 200,
+          },
+        ),
+    });
+    const ids = (
+      await collectContacts(client, { $all: [] }, { pageSize: 2 })
+    ).map((c) => c.id);
+    expect(ids).toEqual([1, 3, 4, 5]);
   });
 });

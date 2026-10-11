@@ -68,4 +68,4 @@ Tests need Postgres at `DATABASE_URL`; the test setup runs `prisma migrate deplo
 - `docs/household-match/design.md`: the job's rules, decisions, guards, and breakers. Read before changing the job.
 - `docs/household-match/runbook.md`: setting up a space, the backfill, the hourly timer, and what to do when a breaker trips.
 - `docs/integrations/qomon-api.md`: dated Qomon API behaviour the client relies on.
-- `docs/household-match/incremental-design.md`: proposed, not built: running the household match every minute on large spaces.
+- `docs/household-match/incremental-design.md`: the incremental job (`--incremental`, `--sweep`): mirror, cursor, dirty households, quarantine, and alerts, for large spaces or one-minute runs.

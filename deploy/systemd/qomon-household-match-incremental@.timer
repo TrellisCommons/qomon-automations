@@ -1,0 +1,10 @@
+[Unit]
+Description=Minutely Qomon household match, incremental (%i)
+
+[Timer]
+OnCalendar=minutely
+# the default AccuracySec of 1 minute would let each start drift by a minute
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

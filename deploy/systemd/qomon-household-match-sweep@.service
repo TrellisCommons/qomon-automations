@@ -1,0 +1,16 @@
+# Nightly full sweep for one space: refetches every contact into the mirror,
+# catching deleted contacts and anything UpdatedAt missed, then does the
+# incremental work. Shares the job's lock, so incremental ticks during it
+# exit at once.
+[Unit]
+Description=Qomon household match, nightly sweep (%i)
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/qomon-automations
+EnvironmentFile=/etc/qomon-automations/compose.env
+ExecStart=/usr/bin/docker compose --profile job run --rm job household-match --space %i --sweep --apply
+TimeoutStartSec=2h
+TimeoutStopSec=5min
