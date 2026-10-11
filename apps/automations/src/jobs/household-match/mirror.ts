@@ -33,6 +33,14 @@ export function householdHashOf(
     .digest('base64url');
 }
 
+/** Identifies the key hashes were made with, without revealing it. */
+export function keyIdOf(secret: Buffer): string {
+  return createHmac('sha256', secret)
+    .update('household-hash-key-id')
+    .digest('hex')
+    .slice(0, 16);
+}
+
 export function mirrorRowOf(
   contact: QomonContact,
   presence: PresenceConfig,
@@ -64,8 +72,9 @@ export function contactOf(
   return {
     id: row.contactId,
     UpdatedAt: row.updatedAt,
+    // an answer can carry only `data`, with no ref id; `presenceOf` reads it
     formdatas:
-      row.presenceRefId === null
+      row.presenceRefId === null && row.presenceValue === null
         ? []
         : [
             {
@@ -88,6 +97,7 @@ export function relevantChange(before: MirrorRow, after: MirrorRow): boolean {
     before.inScope !== after.inScope ||
     before.householdHash !== after.householdHash ||
     before.presenceRefId !== after.presenceRefId ||
+    before.presenceValue !== after.presenceValue ||
     before.presenceDate !== after.presenceDate ||
     before.markerRefId !== after.markerRefId
   );

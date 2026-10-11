@@ -193,6 +193,9 @@ model SyncCursor {
   cursor     String?
   ingestedAt DateTime?
   sweptAt    DateTime?
+  /// fingerprint of the key household hashes were made with; a change
+  /// forces a sweep that rehashes every contact
+  keyId      String?
 
   @@id([spaceKey, job])
   @@map("sync_cursor")

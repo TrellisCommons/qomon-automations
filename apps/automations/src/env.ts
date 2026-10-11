@@ -43,6 +43,19 @@ const EnvSchema = z.object({
     .int()
     .positive()
     .default(5000),
+  /** Due households one incremental run takes, oldest first; a burst
+   *  drains over several runs instead of tripping the sanity limit. */
+  INCREMENTAL_MAX_HOUSEHOLDS_PER_RUN: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(1000),
+  /** A run that cannot write (a dry run, or writes off) re-plans a household
+   *  with pending writes no sooner than this. */
+  DRY_RUN_RECHECK_MINUTES: z.coerce.number().positive().default(60),
+  /** A sweep that finds more contacts missing than this deletes none of
+   *  them: a listing that short is more likely wrong than a mass deletion. */
+  SWEEP_MAX_DELETES: z.coerce.number().int().nonnegative().default(500),
   /** A household that fails this many times is quarantined. */
   QUARANTINE_AFTER_ATTEMPTS: z.coerce.number().int().positive().default(5),
   INGEST_LAG_ALERT_MINUTES: z.coerce.number().positive().default(10),

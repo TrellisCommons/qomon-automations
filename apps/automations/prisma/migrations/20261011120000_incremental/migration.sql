@@ -44,6 +44,7 @@ CREATE TABLE "sync_cursor" (
     "cursor" TEXT,
     "ingestedAt" TIMESTAMP(3),
     "sweptAt" TIMESTAMP(3),
+    "keyId" TEXT,
 
     CONSTRAINT "sync_cursor_pkey" PRIMARY KEY ("spaceKey","job")
 );

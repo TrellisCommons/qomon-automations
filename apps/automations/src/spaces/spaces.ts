@@ -133,6 +133,14 @@ export async function setWritesEnabled(
       before: { writesEnabled: before.writesEnabled },
       after: { writesEnabled: after.writesEnabled },
     });
+    if (enabled) {
+      // households deferred while writes were off become due at once; ones
+      // backing off after a failure keep their back-off
+      await ctx.tx.dirtyHousehold.updateMany({
+        where: { spaceKey: key, quarantinedAt: null, attempts: 0 },
+        data: { nextAttemptAt: new Date() },
+      });
+    }
     return after;
   });
 }

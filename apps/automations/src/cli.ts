@@ -50,8 +50,10 @@ const USAGE = `Usage: pnpm job <command> [options]
 
 /** Exit codes: 0 done (or nothing to do), 1 failed, 2 a circuit breaker
  *  tripped, 3 interrupted (safe to run again). */
-function exitCodeFor(result: RunResult): number {
+function exitCodeFor(result: RunResult, mode?: string): number {
   if (result.status === 'FAILED') return 1;
+  // a skipped sweep must not ping the health check as healthy
+  if (result.status === 'locked' && mode === 'sweep') return 4;
   if (result.status === 'TRIPPED') return 2;
   if (result.status === 'INTERRUPTED') return 3;
   return 0;
@@ -325,9 +327,9 @@ async function householdMatch(
         console.log(`wrote ${n} rows to ${values.report}`);
       }
     }
-    return exitCodeFor(result);
+    return exitCodeFor(result, mode);
   } finally {
-    const ok = result !== undefined && exitCodeFor(result) === 0;
+    const ok = result !== undefined && exitCodeFor(result, mode) === 0;
     // the ping's body is what Healthchecks shows: for the incremental job,
     // how far behind it is
     const body =

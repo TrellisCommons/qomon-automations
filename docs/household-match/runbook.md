@@ -96,7 +96,7 @@ Each run posts to Slack only when something went wrong: a write failed, the run 
 
 For spaces too large to fetch every hour, or to run every minute: see [the incremental design](incremental-design.md). **Check first** that a Presence recorded in the canvassing app moves the contact's `UpdatedAt`; if it does not, this job misses knocks until the nightly sweep.
 
-1. **Seed** the mirror with a dry-run sweep (`job household-match --space <space-key> --sweep`). The first run would sweep anyway; doing it by hand shows how long it takes. Every household it reads starts dirty.
+1. **Seed** the mirror with a dry-run sweep (`job household-match --space <space-key> --sweep`). The first run would sweep anyway; doing it by hand shows how long it takes. Households that need nothing are settled; the rest wait for writes (re-planned hourly while writes are off).
 2. **Shadow** for a day: enable the minutely timer with `--apply` removed from `ExecStart` (a dry run), alongside the hourly full job.
 3. **Switch**: disable the hourly timer, restore `--apply`, and enable both:
 
@@ -107,8 +107,11 @@ For spaces too large to fetch every hour, or to run every minute: see [the incre
    systemctl enable --now qomon-household-match-incremental@<space-key>.timer qomon-household-match-sweep@<space-key>.timer
    ```
 
-   The sweep and the minutely run share the job's lock: a tick during a sweep exits at once.
+   The sweep and the minutely run share the job's lock: a tick during a sweep exits at once, and a sweep waits up to 15 minutes for a minutely run to finish.
 4. **Quarantined households**: the alert names none; find them with `select "householdHash", attempts, "lastError" from dirty_household where "quarantinedAt" is not null`, look at the cause, then `job release --space <space-key> --household <hash>` (or `--contact <id>`).
+
+5. **Sweep deletions refused**: a sweep's listing was missing more contacts than `SWEEP_MAX_DELETES`, so none were removed from the mirror. Check in Qomon whether they were really deleted; if so, run one sweep with a higher `SWEEP_MAX_DELETES`.
+6. **Rotating `SPACE_SECRET_KEY`**: the next incremental run notices and sweeps the space to rehash every household. Expect it to take as long as the seed.
 
 The health check ping body is `{ cursorAgeSeconds, workLagSeconds, quarantined }`, which Healthchecks shows with each ping.
 

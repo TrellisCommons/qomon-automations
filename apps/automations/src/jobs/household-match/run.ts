@@ -1,4 +1,5 @@
 import {
+  QomonMalformedResponseError,
   QomonNotFoundError,
   collectContacts,
   type QomonApi,
@@ -113,6 +114,9 @@ export class UsageError extends Error {
   }
 }
 
+const SWEEP_LOCK_WAIT_MS = 15 * 60_000;
+const LOCK_POLL_MS = 5_000;
+
 export async function runHouseholdMatch(
   deps: RunDeps,
   opts: RunOptions,
@@ -135,7 +139,23 @@ export async function runHouseholdMatch(
     );
   }
 
-  const lock = await deps.lock(`${JOB}:${space.key}`);
+  const lockName = `${JOB}:${space.key}`;
+  let lock = await deps.lock(lockName);
+  // The sweep runs once a night: it waits out a minutely run rather than
+  // being skipped for the day.
+  if (!lock && opts.mode === 'sweep') {
+    const sleep =
+      deps.sleep ??
+      ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+    for (
+      let waited = 0;
+      !lock && waited < SWEEP_LOCK_WAIT_MS;
+      waited += LOCK_POLL_MS
+    ) {
+      await sleep(LOCK_POLL_MS);
+      lock = await deps.lock(lockName);
+    }
+  }
   if (!lock) {
     log.warn('another run holds the lock; exiting');
     return { status: 'locked' };
@@ -390,6 +410,13 @@ async function applyAndVerify(
       try {
         current = await qomon.getContact(write.contactId);
       } catch (err) {
+        // One malformed contact fails its own write, not the run, so its
+        // household can back off and quarantine like any other failure.
+        if (err instanceof QomonMalformedResponseError) {
+          await mark(write.id, 'FAILED', 'contact failed validation');
+          counts.failed += 1;
+          continue;
+        }
         if (!(err instanceof QomonNotFoundError)) throw err;
         await mark(write.id, 'SKIPPED', 'contact no longer exists');
         counts.skipped += 1;
@@ -583,16 +610,24 @@ async function finish(
   return { status, runId: run.id, applying: run.applying, stats, error };
 }
 
-function alert(
+/** Never throws: a run's recorded outcome must not depend on alerting. */
+async function alert(
   deps: RunDeps,
   space: Space,
   result: RunResult,
   opts: RunOptions,
   log: Logger,
 ): Promise<void> {
-  return opts.mode === 'incremental' || opts.mode === 'sweep'
-    ? incrementalAlerts(deps, space, opts, result)
-    : report(deps, space, result, opts, log);
+  try {
+    await (opts.mode === 'incremental' || opts.mode === 'sweep'
+      ? incrementalAlerts(deps, space, opts, result)
+      : report(deps, space, result, opts, log));
+  } catch (err) {
+    log.error(
+      { err: err instanceof Error ? err.message : String(err) },
+      'alerting failed',
+    );
+  }
 }
 
 /** Slack hears about a run only when something went wrong: a write failed,
@@ -771,7 +806,13 @@ async function loadOwnWrites(
 type ReadBack =
   | { state: 'verified'; date: string | null }
   | {
-      state: 'pending' | 'different' | 'unmarked' | 'markerChanged' | 'deleted';
+      state:
+        | 'pending'
+        | 'different'
+        | 'unmarked'
+        | 'markerChanged'
+        | 'deleted'
+        | 'malformed';
     };
 
 const READ_BACK_FAILURES = {
@@ -779,6 +820,7 @@ const READ_BACK_FAILURES = {
   unmarked: 'the household value is there without its marker',
   markerChanged: 'the marker was changed or removed by someone else',
   deleted: 'contact deleted before it could be verified',
+  malformed: 'contact failed validation when read back',
 } as const;
 
 /** A write is verified when Qomon shows the household value with its
@@ -793,6 +835,8 @@ async function readBack(
     contact = await qomon.getContact(write.contactId);
   } catch (err) {
     if (err instanceof QomonNotFoundError) return { state: 'deleted' };
+    if (err instanceof QomonMalformedResponseError)
+      return { state: 'malformed' };
     throw err;
   }
   if (write.field === REMARK_FIELD) {

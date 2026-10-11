@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import {
   paginateContacts,
+  QomonMalformedResponseError,
+  QomonNotFoundError,
   type QomonApi,
   type QomonContact,
 } from '@trellis/qomon-client';
@@ -15,6 +17,7 @@ import type { Logger } from '../../log.js';
 import {
   contactOf,
   householdHashOf,
+  keyIdOf,
   mirrorRowOf,
   relevantChange,
   type MirrorRow,
@@ -52,6 +55,10 @@ export interface IncrementalStats {
   relevant: number;
   /** contacts gone from Qomon (sweeps only) */
   deleted: number;
+  /** contacts in the mirror a sweep's listing did not return */
+  missing: number;
+  /** too many were missing to trust the listing, so none were deleted */
+  deleteRefused: boolean;
   /** contacts a sweep found changed that the minutely ingest should have
    *  seen: the measure of whether UpdatedAt can be trusted */
   drift: number;
@@ -96,17 +103,23 @@ export async function executeIncremental(
   await ingest(ctx);
   if (deps.signal?.aborted) return write.interrupt();
 
-  // Work: every due dirty household, planned from the mirror.
+  // Work: the longest-due dirty households, planned from the mirror. A burst
+  // drains over several runs.
+  const dueWhere = {
+    spaceKey: space.key,
+    quarantinedAt: null,
+    nextAttemptAt: { lte: now() },
+  };
   const due = await deps.prisma.dirtyHousehold.findMany({
-    where: {
-      spaceKey: space.key,
-      quarantinedAt: null,
-      nextAttemptAt: { lte: now() },
-    },
+    where: dueWhere,
+    orderBy: [{ nextAttemptAt: 'asc' }, { markedAt: 'asc' }],
+    take: deps.env.INCREMENTAL_MAX_HOUSEHOLDS_PER_RUN,
     select: { householdHash: true },
   });
   const hashes = due.map((d) => d.householdHash);
-  stats.dirtyHouseholds = hashes.length;
+  stats.dirtyHouseholds = await deps.prisma.dirtyHousehold.count({
+    where: dueWhere,
+  });
   const members = await membersOf(deps.prisma, space.key, hashes);
   const ownWrites = await write.ownWrites();
 
@@ -140,8 +153,10 @@ export async function executeIncremental(
   log.info({ ...stats }, 'planned');
   await write.persistPlan(writes, remarks);
 
-  // A dry run leaves the households dirty: nothing about them is settled.
-  if (!applying) return 'SUCCEEDED';
+  if (!applying) {
+    await defer(ctx, hashes, hashOf, [...writes, ...remarks]);
+    return 'SUCCEEDED';
+  }
   if (total > limit) {
     if (opts.backfill) {
       log.warn(
@@ -179,7 +194,12 @@ async function ingest(ctx: IncrementalContext): Promise<void> {
     where: { spaceKey_job: { spaceKey: space.key, job: 'household-match' } },
   });
   const previous = cursorRow?.cursor ?? null;
-  const sweep = ctx.opts.mode === 'sweep' || previous === null;
+  // Hashes made with another key never match new ones: rehash everything at
+  // once rather than split households until the next sweep.
+  const keyId = keyIdOf(secret);
+  const rekey = cursorRow !== null && cursorRow.keyId !== keyId;
+  if (rekey) log.warn('household hash key changed; sweeping to rehash');
+  const sweep = ctx.opts.mode === 'sweep' || previous === null || rekey;
   const since =
     previous === null ? null : new Date(Date.parse(previous) - overlapMs);
   Object.assign(stats, {
@@ -187,6 +207,8 @@ async function ingest(ctx: IncrementalContext): Promise<void> {
     changed: 0,
     relevant: 0,
     deleted: 0,
+    missing: 0,
+    deleteRefused: false,
     drift: 0,
     invalidContacts: 0,
   });
@@ -252,6 +274,7 @@ async function ingest(ctx: IncrementalContext): Promise<void> {
       // means the minutely ingest missed it.
       if (
         sweep &&
+        !rekey &&
         previous &&
         Date.parse(row.updatedAt) < Date.parse(previous) - overlapMs
       ) {
@@ -279,12 +302,35 @@ async function ingest(ctx: IncrementalContext): Promise<void> {
   await flush();
 
   if (seen) {
-    // Deleted contacts vanish without notice; only a sweep sees them.
+    // Deleted contacts vanish without notice; only a sweep sees them. Paging
+    // uses live offsets, so a contact edited or deleted mid-sweep can push
+    // another past a page boundary: each missing contact is read directly,
+    // and a listing missing too many is not trusted at all.
     const all = await prisma.contactMirror.findMany({
       where: { spaceKey: space.key },
       select: { contactId: true, householdHash: true },
     });
-    const gone = all.filter((r) => !seen.has(r.contactId));
+    const missing = all.filter((r) => !seen.has(r.contactId));
+    stats.missing = missing.length;
+    const gone: typeof missing = [];
+    if (missing.length > deps.env.SWEEP_MAX_DELETES) {
+      stats.deleteRefused = true;
+      log.warn(
+        { missing: missing.length, limit: deps.env.SWEEP_MAX_DELETES },
+        'sweep listing is missing too many contacts; deleting none',
+      );
+    } else {
+      for (const r of missing) {
+        try {
+          page.push(await ctx.qomon.getContact(r.contactId));
+        } catch (err) {
+          if (err instanceof QomonNotFoundError) gone.push(r);
+          else if (!(err instanceof QomonMalformedResponseError)) throw err;
+        }
+        if (deps.signal?.aborted) return;
+      }
+      await flush();
+    }
     for (let i = 0; i < gone.length; i += PAGE) {
       const chunk = gone.slice(i, i + PAGE);
       await markDirty(prisma, space.key, [
@@ -311,8 +357,14 @@ async function ingest(ctx: IncrementalContext): Promise<void> {
       cursor,
       ingestedAt: now(),
       sweptAt: sweep ? now() : null,
+      keyId,
     },
-    update: { cursor, ingestedAt: now(), ...(sweep ? { sweptAt: now() } : {}) },
+    update: {
+      cursor,
+      ingestedAt: now(),
+      keyId,
+      ...(sweep ? { sweptAt: now() } : {}),
+    },
   });
   log.info({ ...stats, cursor }, sweep ? 'swept' : 'ingested');
 }
@@ -444,6 +496,46 @@ async function settle(
   }
 }
 
+/**
+ * A run that cannot write settles the households that need nothing and
+ * re-plans the rest only after `DRY_RUN_RECHECK_MINUTES`, so a shadow day or
+ * a tripped breaker does not re-plan and re-save the same writes every
+ * minute. Turning writes back on makes them due at once (`setWritesEnabled`).
+ */
+async function defer(
+  ctx: IncrementalContext,
+  hashes: string[],
+  hashOf: Map<number, string>,
+  planned: { contactId: number }[],
+) {
+  const { deps, space } = ctx;
+  const now = deps.now ?? (() => new Date());
+  const waiting = new Set(planned.map((w) => hashOf.get(w.contactId)));
+  const done = hashes.filter((h) => !waiting.has(h));
+  for (let i = 0; i < done.length; i += PAGE) {
+    await deps.prisma.dirtyHousehold.deleteMany({
+      where: {
+        spaceKey: space.key,
+        householdHash: { in: done.slice(i, i + PAGE) },
+      },
+    });
+  }
+  const later = hashes.filter((h) => waiting.has(h));
+  for (let i = 0; i < later.length; i += PAGE) {
+    await deps.prisma.dirtyHousehold.updateMany({
+      where: {
+        spaceKey: space.key,
+        householdHash: { in: later.slice(i, i + PAGE) },
+      },
+      data: {
+        nextAttemptAt: new Date(
+          now().getTime() + deps.env.DRY_RUN_RECHECK_MINUTES * 60_000,
+        ),
+      },
+    });
+  }
+}
+
 /** Puts a quarantined household back in line. */
 export async function releaseHousehold(
   prisma: PrismaClient,
@@ -487,9 +579,11 @@ export async function healthOf(
   const cursor = await prisma.syncCursor.findUnique({
     where: { spaceKey_job: { spaceKey, job: 'household-match' } },
   });
+  // Measured from when a household became due, so one backing off after a
+  // failure does not read as the whole job falling behind.
   const oldest = await prisma.dirtyHousehold.findFirst({
     where: { spaceKey, quarantinedAt: null, nextAttemptAt: { lte: at } },
-    orderBy: { markedAt: 'asc' },
+    orderBy: { nextAttemptAt: 'asc' },
   });
   const quarantined = await prisma.dirtyHousehold.count({
     where: { spaceKey, quarantinedAt: { not: null } },
@@ -498,7 +592,7 @@ export async function healthOf(
     d ? Math.round((at.getTime() - d.getTime()) / 1000) : null;
   return {
     cursorAgeSeconds: age(cursor?.ingestedAt),
-    workLagSeconds: age(oldest?.markedAt),
+    workLagSeconds: age(oldest?.nextAttemptAt),
     quarantined,
   };
 }
@@ -541,6 +635,9 @@ export async function incrementalAlerts(
   const fresh = await deps.prisma.space.findUnique({
     where: { key: space.key },
   });
+  // Only an applying run knows whether writes being off is a problem; a
+  // manual dry run must neither raise nor clear it.
+  const unevaluated = opts.apply ? [] : ['writes-off'];
   if (
     opts.apply &&
     deps.env.QOMON_WRITES_ALLOWED &&
@@ -579,6 +676,15 @@ export async function incrementalAlerts(
       event(
         'change-spike',
         `${s.changed} contacts changed at once ${where}; this run plans ${(s.planned ?? 0) + (s.remarks ?? 0)} writes, about ${minutes} min`,
+      ),
+    );
+  }
+  if (s.deleteRefused) {
+    alerts.push(
+      event(
+        'sweep-deletes-refused',
+        `the sweep ${where} did not return ${s.missing} contacts it knows about, over the limit of ${deps.env.SWEEP_MAX_DELETES}; none were deleted. Check whether Qomon deleted them, then raise \`SWEEP_MAX_DELETES\` for one sweep`,
+        24 * 60,
       ),
     );
   }
@@ -656,5 +762,13 @@ export async function incrementalAlerts(
     );
   }
 
-  await syncAlerts(deps.prisma, space.key, alerts, deps.notify, deps.log, now);
+  await syncAlerts(
+    deps.prisma,
+    space.key,
+    alerts,
+    deps.notify,
+    deps.log,
+    now,
+    unevaluated,
+  );
 }

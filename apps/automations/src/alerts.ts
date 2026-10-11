@@ -24,6 +24,8 @@ export async function syncAlerts(
   notify: (text: string) => Promise<void>,
   log: Logger,
   now: Date = new Date(),
+  /** conditions this run could not evaluate; their state is left as it is */
+  unevaluated: string[] = [],
 ): Promise<void> {
   const posted = new Map(
     (await prisma.alertState.findMany({ where: { spaceKey } })).map((a) => [
@@ -31,14 +33,19 @@ export async function syncAlerts(
       a,
     ]),
   );
-  const send = async (text: string) => {
+  for (const key of unevaluated) posted.delete(`condition:${key}`);
+  // State changes only once Slack has the message, so a failed post is
+  // retried on the next run instead of being recorded as sent.
+  const send = async (text: string): Promise<boolean> => {
     try {
       await notify(text);
+      return true;
     } catch (err) {
       log.error(
         { err: err instanceof Error ? err.message : String(err) },
         'Slack alert failed',
       );
+      return false;
     }
   };
 
@@ -51,7 +58,7 @@ export async function syncAlerts(
       const cooldown = (alert.cooldownMinutes ?? 360) * 60_000;
       if (now.getTime() - before.raisedAt.getTime() < cooldown) continue;
     }
-    await send(`:rotating_light: ${alert.text}`);
+    if (!(await send(`:rotating_light: ${alert.text}`))) continue;
     await prisma.alertState.upsert({
       where: { spaceKey_alertKey: { spaceKey, alertKey: alert.key } },
       create: { spaceKey, alertKey: alert.key, raisedAt: now },
@@ -70,9 +77,10 @@ export async function syncAlerts(
       }
       continue;
     }
-    await send(
+    const sent = await send(
       `:white_check_mark: resolved: ${key.replace(/^condition:/, '')} on space \`${spaceKey}\``,
     );
+    if (!sent) continue;
     await prisma.alertState.delete({
       where: { spaceKey_alertKey: { spaceKey, alertKey: key } },
     });
