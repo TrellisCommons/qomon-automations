@@ -55,7 +55,7 @@ The first run catches up on every address knocked so far. Do it by hand, before 
    job household-match --space <space-key> --backfill --apply --max-writes <planned + 10%>
    ```
 
-   It posts its size and rough duration to Slack, then writes in batches of 20 and verifies each by reading it back. Each write is a read, the upsert, and at least one read back, so at `QOMON_RPS=5` expect 1 to 2 writes per second, about 10 to 15 minutes per 1,000. `QOMON_RPS=8` (Qomon refills at 10 per second) brings that to about 7 minutes. If more than `MAX_FAILED_SHARE` of writes fail, it stops and turns the space's writes off. Over `--max-writes` it writes nothing and exits 2; dry-run again.
+   It writes in batches of 20 and verifies each by reading it back. Each write is a read, the upsert, and at least one read back, so at `QOMON_RPS=5` expect 1 to 2 writes per second, about 10 to 15 minutes per 1,000. `QOMON_RPS=8` (Qomon refills at 10 per second) brings that to about 7 minutes. If more than `MAX_FAILED_SHARE` of writes fail, it stops and turns the space's writes off. Over `--max-writes` it writes nothing and exits 2; dry-run again.
 5. **Watch it** from another shell; progress is saved after every batch:
 
    ```bash
@@ -82,7 +82,7 @@ journalctl -u 'qomon-household-match@*' --since today
 
 `/etc/qomon-automations/compose.env` holds `POSTGRES_PASSWORD` for Compose; `/etc/qomon-automations/.env` holds the job's environment, with `QOMON_WRITES_ALLOWED=true`. Both are root-only.
 
-Each run posts to Slack only when it applied writes, a write failed, or the run failed or tripped. It pings `HEALTHCHECK_URL` at the end (`/fail` on failure), so a dead timer shows up as a missed ping.
+Each run posts to Slack only when something went wrong: a write failed, the run failed, or a breaker tripped. Successful runs post nothing; check them with `job status`. It pings `HEALTHCHECK_URL` at the end (`/fail` on failure), so a dead timer shows up as a missed ping.
 
 | Exit | Meaning |
 |---|---|
