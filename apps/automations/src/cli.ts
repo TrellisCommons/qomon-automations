@@ -2,11 +2,12 @@ import { parseArgs } from 'node:util';
 import { loadEnv, requireSecretKey, type Env } from './env.js';
 import { getPrisma, type PrismaClient } from './db.js';
 import {
+  loadPresenceConfig,
   runHouseholdMatch,
   UsageError,
   type RunResult,
 } from './jobs/household-match/run.js';
-import { resolvePresenceConfig } from './jobs/household-match/presence.js';
+
 import { tryAdvisoryLock } from './lock.js';
 import { createLogger } from './log.js';
 import { pingHealthcheck, postSlack } from './notify/slack.js';
@@ -28,8 +29,11 @@ const USAGE = `Usage: pnpm job <command> [options]
 
   status --space <key> [--run <id>]      Recent runs, with progress and ETA while one is applying
   report --run <id> --out <file.csv>     A run's planned writes (contact ids only)
-  space:add --key <key> --name <name> --canvassed <v1,v2,...> --household-value <v>
+  space:add --key <key> --name <name> --canvassed <v1,v2,...>
+            [--household-value <v>] [--marker-field <label>] [--marker-value <v>]
             [--municipality <city>] [--active-until <ISO date>] [--api-base <url>]
+      Defaults: household value "absent", marker field "Presence source" with
+      "household_match".
       Create or update a space. A new space reads its Qomon API key from stdin.
   space:check --key <key>                Read-only: check the config against Qomon's Presence form
   space:show --key <key>                 Print a space's config (never its API key)
@@ -95,6 +99,8 @@ async function main(argv: string[]): Promise<number> {
       name: { type: 'string' },
       canvassed: { type: 'string' },
       'household-value': { type: 'string' },
+      'marker-field': { type: 'string' },
+      'marker-value': { type: 'string' },
       municipality: { type: 'string' },
       'active-until': { type: 'string' },
       'api-base': { type: 'string' },
@@ -134,9 +140,9 @@ async function main(argv: string[]): Promise<number> {
       }
       case 'space:add': {
         const key = values.key;
-        if (!key || !values.name || !values['household-value']) {
+        if (!key || !values.name || !values.canvassed) {
           throw new UsageError(
-            'space:add needs --key, --name, --canvassed, and --household-value',
+            'space:add needs --key, --name, and --canvassed',
           );
         }
         const space = await saveSpace(
@@ -153,6 +159,8 @@ async function main(argv: string[]): Promise<number> {
               : null,
             canvassedValues: list(values.canvassed),
             householdValue: values['household-value'],
+            markerField: values['marker-field'],
+            markerValue: values['marker-value'],
           },
           actorName(),
         );
@@ -171,22 +179,15 @@ async function main(argv: string[]): Promise<number> {
       }
       case 'space:check': {
         const space = await getSpace(prisma, required(values.key, '--key'));
-        const forms = await qomonFor(
-          space,
-          env,
-          requireSecretKey(env),
-        ).listFormsByType('presence_status');
+        const qomon = qomonFor(space, env, requireSecretKey(env));
+        const forms = await qomon.listFormsByType('presence_status');
         console.log(
           'Presence values:',
           forms.flatMap((f) => f.refvalues.map((r) => r.value)).join(', '),
         );
-        resolvePresenceConfig(
-          forms,
-          space.canvassedValues,
-          space.householdValue,
-        );
+        const config = await loadPresenceConfig(qomon, space);
         console.log(
-          `space ${space.key}: canvassed values and household value are on the Presence form`,
+          `space ${space.key}: canvassed values and household value ${JSON.stringify(config.household.value)} are on the Presence form, and custom field ${JSON.stringify(config.marker.form.label)} has ${JSON.stringify(config.marker.value.value)}`,
         );
         return 0;
       }

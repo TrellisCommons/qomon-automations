@@ -1,8 +1,22 @@
 import { disposableName, runQomonContractSuite } from './contract-suite.js';
-import { InMemoryQomon } from './fake.js';
+import { FAKE_PRESENCE_FORM, InMemoryQomon } from './fake.js';
 
 runQomonContractSuite('in-memory fake', async () => {
-  const api = new InMemoryQomon();
+  const api = new InMemoryQomon({
+    forms: {
+      presence_status: [FAKE_PRESENCE_FORM],
+      custom_fields: [
+        {
+          id: 9201,
+          label: 'Presence source',
+          type: 'radio',
+          refvalues: [
+            { id: 9211, value: 'household_match', label: 'Household match' },
+          ],
+        },
+      ],
+    },
+  });
   return {
     api,
     metadataSupported: true,
@@ -47,5 +61,6 @@ runQomonContractSuite('in-memory fake', async () => {
     async settle() {
       api.flushUpserts();
     },
+    markerField: 'Presence source',
   };
 });

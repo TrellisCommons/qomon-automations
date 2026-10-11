@@ -49,7 +49,6 @@ export async function makeSpace(
       qomonApiKeyEncrypted: encryptSecret('sandbox-key', SECRET_KEY),
       writesEnabled: true,
       canvassedValues: ['present', 'absent', 'refus', 'repasse'],
-      householdValue: 'Absent (household)',
       ...data,
     },
   });

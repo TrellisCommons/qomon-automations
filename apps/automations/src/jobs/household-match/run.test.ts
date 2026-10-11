@@ -25,7 +25,6 @@ const FORM: QomonForm = {
     { id: 12, value: 'absent', label: 'absent' },
     { id: 13, value: 'refus', label: 'refusal' },
     { id: 14, value: 'repasse', label: 'repasse' },
-    { id: 15, value: 'Absent (household)', label: 'Absent (household)' },
   ],
 };
 
@@ -39,6 +38,22 @@ function presence(value: string) {
       date: '2026-10-01T15:00:00Z',
     },
   ];
+}
+
+const MARKER: QomonForm = {
+  id: 2,
+  label: 'Presence source',
+  type: 'radio',
+  refvalues: [{ id: 21, value: 'household_match', label: 'Household match' }],
+};
+const MARK = [{ form_id: MARKER.id, form_ref_id: 21, data: 'household_match' }];
+
+/** the household value and its marker, as the job writes them */
+function householdWrite(c: QomonContact): boolean {
+  return (
+    presenceValue(c) === 'absent' &&
+    (c.custom_fields?.some((f) => f.form_ref_id === 21) ?? false)
+  );
 }
 
 function presenceValue(c: QomonContact): string | undefined {
@@ -109,7 +124,9 @@ const hourly: RunOptions = {
 
 beforeEach(async () => {
   await resetDb(prisma);
-  qomon = new InMemoryQomon({ forms: { presence_status: [FORM] } });
+  qomon = new InMemoryQomon({
+    forms: { presence_status: [FORM], custom_fields: [MARKER] },
+  });
   seed(qomon);
 });
 
@@ -123,12 +140,8 @@ describe('household match run', () => {
     expect(result).toMatchObject({
       stats: { planned: 2, applied: 2, verified: 2, failed: 0, skipped: 0 },
     });
-    expect(presenceValue(await qomon.getContact(ids.housemate))).toBe(
-      'Absent (household)',
-    );
-    expect(presenceValue(await qomon.getContact(ids.roommate))).toBe(
-      'Absent (household)',
-    );
+    expect(householdWrite(await qomon.getContact(ids.housemate))).toBe(true);
+    expect(householdWrite(await qomon.getContact(ids.roommate))).toBe(true);
     expect(presenceValue(await qomon.getContact(ids.alreadyAbsent))).toBe(
       'absent',
     );
@@ -147,6 +160,42 @@ describe('household match run', () => {
       before: { presence: null },
     });
     expect(d.notify).toHaveBeenCalledOnce();
+  });
+
+  it('records the Presence date each write got, for telling its writes from later knocks', async () => {
+    await makeSpace(prisma);
+    await runHouseholdMatch(deps(), hourly);
+    const write = await prisma.plannedWrite.findFirstOrThrow({
+      where: { contactId: ids.housemate },
+    });
+    const current = (await qomon.getContact(ids.housemate)).formdatas!.find(
+      (f) => f.form_id === FORM.id,
+    )!;
+    expect(write.writtenPresenceDate).toBe(current.date);
+  });
+
+  it('fails a write that lands without its marker', async () => {
+    await makeSpace(prisma);
+    const api: QomonApi = Object.create(qomon, {
+      upsertContact: {
+        value: ({
+          custom_fields: _dropped,
+          ...rest
+        }: Parameters<QomonApi['upsertContact']>[0]) =>
+          qomon.upsertContact(rest),
+      },
+    });
+    const result = await runHouseholdMatch(deps({ api }), hourly);
+    expect(result).toMatchObject({
+      stats: { applied: 2, verified: 0, failed: 2 },
+    });
+    expect(
+      (
+        await prisma.plannedWrite.findFirstOrThrow({
+          where: { status: 'FAILED' },
+        })
+      ).detail,
+    ).toBe('the household value is there without its marker');
   });
 
   it('is idempotent: the next run plans nothing and stays quiet', async () => {
@@ -399,12 +448,8 @@ describe('progress and restarts', () => {
       status: 'SUCCEEDED',
       stats: { planned: 1, verified: 1 },
     });
-    expect(presenceValue(await qomon.getContact(ids.housemate))).toBe(
-      'Absent (household)',
-    );
-    expect(presenceValue(await qomon.getContact(ids.roommate))).toBe(
-      'Absent (household)',
-    );
+    expect(householdWrite(await qomon.getContact(ids.housemate))).toBe(true);
+    expect(householdWrite(await qomon.getContact(ids.roommate))).toBe(true);
   });
 
   it('settles a run that was killed outright before planning again', async () => {
@@ -413,7 +458,8 @@ describe('progress and restarts', () => {
     // and dropped, one never attempted
     qomon.seedContact({
       ...(await qomon.getContact(ids.roommate)),
-      formdatas: presence('Absent (household)'),
+      formdatas: presence('absent'),
+      custom_fields: MARK,
     });
     const dead = await prisma.jobRun.create({
       data: {
@@ -430,7 +476,7 @@ describe('progress and restarts', () => {
       runId: dead.id,
       contactId,
       field: 'presence',
-      valueAfter: 'Absent (household)',
+      valueAfter: 'absent',
       triggerContactId: ids.knocked,
       reason: 'test',
       status,

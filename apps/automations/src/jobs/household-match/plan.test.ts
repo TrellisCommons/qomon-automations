@@ -12,16 +12,27 @@ const FORM: QomonForm = {
     { id: 12, value: 'absent', label: 'absent' },
     { id: 13, value: 'refus', label: 'refusal' },
     { id: 14, value: 'repasse', label: 'repasse' },
-    { id: 15, value: 'Absent (household)', label: 'Absent (household)' },
   ],
 };
+const MARKER: QomonForm = {
+  id: 2,
+  label: 'Presence source',
+  type: 'radio',
+  refvalues: [{ id: 21, value: 'household_match', label: 'Household match' }],
+};
 const CANVASSED = ['present', 'absent', 'refus', 'repasse'];
-const config = resolvePresenceConfig([FORM], CANVASSED, 'Absent (household)');
+const SETTINGS = {
+  canvassedValues: CANVASSED,
+  householdValue: 'absent',
+  markerField: 'Presence source',
+  markerValue: 'household_match',
+};
+const config = resolvePresenceConfig([FORM], [MARKER], SETTINGS);
 
 let nextId = 100;
 function contact(
   address: Record<string, string>,
-  presence?: { value: string; date?: string },
+  presence?: { value: string; date?: string; marked?: boolean },
 ): QomonContact {
   const ref =
     presence && FORM.refvalues.find((r) => r.value === presence.value)!;
@@ -38,8 +49,16 @@ function contact(
           },
         ]
       : [],
+    custom_fields: presence?.marked
+      ? [{ form_id: MARKER.id, form_ref_id: 21, data: 'household_match' }]
+      : [],
   };
 }
+
+const written = (
+  address: Record<string, string>,
+  date = '2026-10-02T09:00:00Z',
+) => contact(address, { value: 'absent', date, marked: true });
 
 describe('planHouseholdMatch', () => {
   it('writes the household value to everyone without a Presence at a canvassed address', () => {
@@ -78,16 +97,13 @@ describe('planHouseholdMatch', () => {
       { housenumber: '9', street: 'Demo Ln' },
       { value: 'refus' },
     );
-    const written = contact(
-      { housenumber: '9', street: 'Demo Lane' },
-      { value: 'Absent (household)' },
-    );
+    const ours = written({ housenumber: '9', street: 'Demo Lane' });
     const canvassedToo = contact(
       { housenumber: '9', street: 'Demo Ln' },
       { value: 'repasse' },
     );
     const plan = planHouseholdMatch(
-      [knocked, written, canvassedToo],
+      [knocked, ours, canvassedToo],
       config,
       null,
     );
@@ -96,22 +112,82 @@ describe('planHouseholdMatch', () => {
   });
 
   it('a written household value never triggers further writes', () => {
-    const written = contact(
+    const ours = written({ housenumber: '9', street: 'Demo Ln' });
+    const other = contact({ housenumber: '9', street: 'Demo Ln' });
+    const own = new Map([[ours.id!, '2026-10-02T09:00:00Z']]);
+    expect(planHouseholdMatch([ours, other], config, null, own).writes).toEqual(
+      [],
+    );
+    // with no record of the write (a rebuilt database), the marker decides
+    expect(planHouseholdMatch([ours, other], config, null).writes).toEqual([]);
+  });
+
+  it('an unmarked absent is a real knock', () => {
+    const knocked = contact(
       { housenumber: '9', street: 'Demo Ln' },
-      { value: 'Absent (household)' },
+      { value: 'absent' },
     );
     const other = contact({ housenumber: '9', street: 'Demo Ln' });
-    expect(planHouseholdMatch([written, other], config, null).writes).toEqual(
+    expect(
+      planHouseholdMatch([knocked, other], config, null).writes,
+    ).toMatchObject([
+      {
+        contactId: other.id,
+        triggerContactId: knocked.id,
+        triggerValue: 'absent',
+      },
+    ]);
+  });
+
+  it('a marked absent recorded again by a canvasser is a real knock', () => {
+    // the marker stays when Presence is recorded again, but its date moves
+    const reknocked = written(
+      { housenumber: '9', street: 'Demo Ln' },
+      '2026-10-05T18:00:00Z',
+    );
+    const other = contact({ housenumber: '9', street: 'Demo Ln' });
+    const own = new Map([[reknocked.id!, '2026-10-02T09:00:00Z']]);
+    expect(
+      planHouseholdMatch([reknocked, other], config, null, own).writes,
+    ).toMatchObject([
+      {
+        contactId: other.id,
+        triggerContactId: reknocked.id,
+        triggerDate: '2026-10-05T18:00:00Z',
+      },
+    ]);
+  });
+
+  it('a marked contact with a different Presence value is a real knock', () => {
+    const knocked = contact(
+      { housenumber: '9', street: 'Demo Ln' },
+      { value: 'repasse', marked: true },
+    );
+    const other = contact({ housenumber: '9', street: 'Demo Ln' });
+    expect(
+      planHouseholdMatch([knocked, other], config, null).writes.map(
+        (w) => w.contactId,
+      ),
+    ).toEqual([other.id]);
+  });
+
+  it('compares recorded dates as instants', () => {
+    const ours = written(
+      { housenumber: '9', street: 'Demo Ln' },
+      '2026-10-02T09:00:00.000000Z',
+    );
+    const other = contact({ housenumber: '9', street: 'Demo Ln' });
+    const own = new Map([[ours.id!, '2026-10-02T09:00:00Z']]);
+    expect(planHouseholdMatch([ours, other], config, null, own).writes).toEqual(
       [],
     );
   });
 
   it('only allowlisted values trigger', () => {
-    const narrow = resolvePresenceConfig(
-      [FORM],
-      ['present'],
-      'Absent (household)',
-    );
+    const narrow = resolvePresenceConfig([FORM], [MARKER], {
+      ...SETTINGS,
+      canvassedValues: ['present'],
+    });
     const knocked = contact(
       { housenumber: '9', street: 'Demo Ln' },
       { value: 'refus' },
@@ -226,40 +302,60 @@ describe('municipality', () => {
 
 describe('resolvePresenceConfig', () => {
   it('refuses a household value the form does not have', () => {
-    const noHousehold = {
-      ...FORM,
-      refvalues: FORM.refvalues.filter((r) => r.id !== 15),
-    };
     expect(() =>
-      resolvePresenceConfig([noHousehold], CANVASSED, 'Absent (household)'),
+      resolvePresenceConfig([FORM], [MARKER], {
+        ...SETTINGS,
+        householdValue: 'Absent (household)',
+      }),
     ).toThrow(/not on the Presence form/);
   });
 
   it('refuses canvassed values the form does not have, and an empty allowlist', () => {
     expect(() =>
-      resolvePresenceConfig(
-        [FORM],
-        ['present', 'Accepted'],
-        'Absent (household)',
-      ),
+      resolvePresenceConfig([FORM], [MARKER], {
+        ...SETTINGS,
+        canvassedValues: ['present', 'Accepted'],
+      }),
     ).toThrow(/"Accepted"/);
     expect(() =>
-      resolvePresenceConfig([FORM], [], 'Absent (household)'),
+      resolvePresenceConfig([FORM], [MARKER], {
+        ...SETTINGS,
+        canvassedValues: [],
+      }),
     ).toThrow(PresenceConfigError);
   });
 
-  it('refuses a household value that is also canvassed', () => {
-    expect(() => resolvePresenceConfig([FORM], CANVASSED, 'absent')).toThrow(
-      /also a canvassed value/,
+  it('allows the household value to be a canvassed value, since the marker tells them apart', () => {
+    expect(
+      resolvePresenceConfig([FORM], [MARKER], SETTINGS).household.value,
+    ).toBe('absent');
+  });
+
+  it('needs the marker field, single choice, with the marker value', () => {
+    expect(() => resolvePresenceConfig([FORM], [], SETTINGS)).toThrow(
+      /found 0/,
     );
+    expect(() =>
+      resolvePresenceConfig(
+        [FORM],
+        [{ ...MARKER, type: 'checkbox' }],
+        SETTINGS,
+      ),
+    ).toThrow(/single choice/);
+    expect(() =>
+      resolvePresenceConfig([FORM], [MARKER], {
+        ...SETTINGS,
+        markerValue: 'other',
+      }),
+    ).toThrow(/has no value "other"/);
   });
 
   it('needs exactly one Presence form', () => {
+    expect(() => resolvePresenceConfig([], [MARKER], SETTINGS)).toThrow(
+      /found 0/,
+    );
     expect(() =>
-      resolvePresenceConfig([], CANVASSED, 'Absent (household)'),
-    ).toThrow(/found 0/);
-    expect(() =>
-      resolvePresenceConfig([FORM, FORM], CANVASSED, 'Absent (household)'),
+      resolvePresenceConfig([FORM, FORM], [MARKER], SETTINGS),
     ).toThrow(/found 2/);
   });
 });

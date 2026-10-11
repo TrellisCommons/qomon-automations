@@ -18,8 +18,10 @@ import { resolveWriteMode } from '../../qomon/write-mode.js';
 import { getSpace, setWritesEnabled } from '../../spaces/spaces.js';
 import { householdKeyOf, planHouseholdMatch, type PlanStats } from './plan.js';
 import {
+  isMarked,
   presenceOf,
   resolvePresenceConfig,
+  type OwnWrites,
   type PresenceConfig,
 } from './presence.js';
 
@@ -171,11 +173,7 @@ async function execute(
   log: Logger,
 ): Promise<RunStatus> {
   const qomon = deps.qomonFor(space);
-  const presence = resolvePresenceConfig(
-    await qomon.listFormsByType('presence_status'),
-    space.canvassedValues,
-    space.householdValue,
-  );
+  const presence = await loadPresenceConfig(qomon, space);
 
   if (applying)
     stats.reconciled = await reconcileAbandoned(
@@ -189,7 +187,12 @@ async function execute(
 
   const contacts = await collectContacts(qomon, { $all: [] });
   if (deps.signal?.aborted) return interrupt(deps, run, log);
-  const plan = planHouseholdMatch(contacts, presence, space.municipality);
+  const plan = planHouseholdMatch(
+    contacts,
+    presence,
+    space.municipality,
+    await loadOwnWrites(deps.prisma, space.key),
+  );
   const limit = opts.maxWrites ?? deps.env.MAX_WRITES_PER_RUN;
   Object.assign(stats, plan.stats, {
     limit,
@@ -324,6 +327,11 @@ async function applyAndVerify(
           name_presences: [
             { id: presence.form.id, value: presence.household.value },
           ],
+          // Qomon applies a record whole or drops it whole (test space,
+          // 2026-10-11): the value never lands without its marker
+          custom_fields: [
+            { id: presence.marker.form.id, value: presence.marker.value.value },
+          ],
         });
         await mark(write.id, 'APPLIED');
         counts.applied += 1;
@@ -344,30 +352,21 @@ async function applyAndVerify(
     const deadline = now().getTime() + deps.env.VERIFY_TIMEOUT_SECONDS * 1000;
     while (pending.size > 0) {
       for (const write of [...pending.values()]) {
-        let seen;
-        try {
-          seen = presenceOf(
-            await qomon.getContact(write.contactId),
-            presence.form,
-          );
-        } catch (err) {
-          if (!(err instanceof QomonNotFoundError)) throw err;
-          pending.delete(write.id);
-          await mark(
-            write.id,
-            'FAILED',
-            'contact deleted before it could be verified',
-          );
-          counts.failed += 1;
-          continue;
-        }
-        if (!seen) continue;
+        const seen = await readBack(qomon, write.contactId, presence);
+        if (seen.state === 'pending') continue;
         pending.delete(write.id);
-        if (seen.refId === presence.household.id) {
-          await mark(write.id, 'VERIFIED');
+        if (seen.state === 'verified') {
+          await deps.prisma.plannedWrite.update({
+            where: { id: write.id },
+            data: {
+              status: 'VERIFIED',
+              detail: null,
+              writtenPresenceDate: seen.date,
+            },
+          });
           counts.verified += 1;
         } else {
-          await mark(write.id, 'FAILED', 'a different Presence was recorded');
+          await mark(write.id, 'FAILED', READ_BACK_FAILURES[seen.state]);
           counts.failed += 1;
         }
       }
@@ -554,30 +553,23 @@ async function reconcileAbandoned(
       where: { runId: old.id, status: { in: ['APPLYING', 'APPLIED'] } },
     });
     for (const write of unsettled) {
-      let seen;
-      try {
-        seen = presenceOf(
-          await qomon.getContact(write.contactId),
-          presence.form,
-        );
-      } catch (err) {
-        if (!(err instanceof QomonNotFoundError)) throw err;
-        seen = null;
-      }
-      const verified = seen?.refId === presence.household.id;
+      const seen = await readBack(qomon, write.contactId, presence);
       await deps.prisma.plannedWrite.update({
         where: { id: write.id },
-        data: verified
-          ? {
-              status: 'VERIFIED',
-              detail: `verified by run ${run.id} after the run was abandoned`,
-            }
-          : {
-              status: 'FAILED',
-              detail: seen
-                ? `a different Presence was recorded (checked by run ${run.id})`
-                : `not in Qomon when run ${run.id} checked; planned again`,
-            },
+        data:
+          seen.state === 'verified'
+            ? {
+                status: 'VERIFIED',
+                detail: `verified by run ${run.id} after the run was abandoned`,
+                writtenPresenceDate: seen.date,
+              }
+            : {
+                status: 'FAILED',
+                detail:
+                  seen.state === 'pending'
+                    ? `not in Qomon when run ${run.id} checked; planned again`
+                    : `${READ_BACK_FAILURES[seen.state]} (checked by run ${run.id})`,
+              },
       });
       reconciled += 1;
     }
@@ -626,4 +618,60 @@ async function announceBackfill(
 
 function statsJson(stats: Partial<RunStats>): Prisma.InputJsonValue {
   return JSON.parse(JSON.stringify(stats)) as Prisma.InputJsonValue;
+}
+
+export async function loadPresenceConfig(
+  qomon: QomonApi,
+  space: Space,
+): Promise<PresenceConfig> {
+  return resolvePresenceConfig(
+    await qomon.listFormsByType('presence_status'),
+    await qomon.listFormsByType('custom_fields'),
+    space,
+  );
+}
+
+/** Contacts this job wrote and verified in the space, with the Presence date
+ *  each write got (see `classifyPresence`). */
+async function loadOwnWrites(
+  prisma: PrismaClient,
+  spaceKey: string,
+): Promise<OwnWrites> {
+  const rows = await prisma.plannedWrite.findMany({
+    where: { status: 'VERIFIED', run: { spaceKey } },
+    select: { contactId: true, writtenPresenceDate: true },
+    orderBy: { updatedAt: 'asc' },
+  });
+  return new Map(rows.map((r) => [r.contactId, r.writtenPresenceDate]));
+}
+
+type ReadBack =
+  | { state: 'verified'; date: string | null }
+  | { state: 'pending' | 'different' | 'unmarked' | 'deleted' };
+
+const READ_BACK_FAILURES = {
+  different: 'a different Presence was recorded',
+  unmarked: 'the household value is there without its marker',
+  deleted: 'contact deleted before it could be verified',
+} as const;
+
+/** A write is verified when Qomon shows the household value with its
+ *  marker; `pending` means no Presence yet. */
+async function readBack(
+  qomon: QomonApi,
+  contactId: number,
+  presence: PresenceConfig,
+): Promise<ReadBack> {
+  let contact;
+  try {
+    contact = await qomon.getContact(contactId);
+  } catch (err) {
+    if (err instanceof QomonNotFoundError) return { state: 'deleted' };
+    throw err;
+  }
+  const seen = presenceOf(contact, presence.form);
+  if (!seen) return { state: 'pending' };
+  if (seen.refId !== presence.household.id) return { state: 'different' };
+  if (!isMarked(contact, presence)) return { state: 'unmarked' };
+  return { state: 'verified', date: seen.date };
 }

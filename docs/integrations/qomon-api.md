@@ -19,6 +19,16 @@ As of 2026-10-07 (sandbox spike, [issue #1](https://github.com/TrellisCommons/qo
 - An API-written answer has no author or channel, and no interaction is created.
 - A value not on the form cannot be added through the API (as of 2026-10-11). Writing one is accepted (202) and dropped whether the answer names the form by id, by label, or under `forms` instead of `name_presences`, and the form gains no value. `/forms/{id}` and `/v1/forms/type/{type}` allow only `GET`; no `refvalues` path exists. `POST /forms` exists but takes `contact`, `token`, `base_id`, and `slug`, which looks like an online-form submission, not a form definition. Whether Qomon's settings screens can add a Presence value is not known; the four values match the vendor's own example, which suggests a fixed list.
 
+## Custom fields
+
+As of 2026-10-11 (University—Rosedale test space; the contract suite's marker tests re-check it with `QOMON_MARKER_FIELD`):
+
+- A custom field and Presence can be written in one upsert: `custom_fields: [{ id: <field id>, value }]` (or `label` instead of `id`). Both land together, in about 3 seconds.
+- A custom field answer reads back in `custom_fields` (not `formdatas`) as `{ id, form_id, form_ref_id, data }`, with **no date**.
+- Search returns `custom_fields` inline, a few seconds behind the write. `custom_fields ext` is a valid search condition.
+- An unknown value for a custom field drops the whole record, Presence included.
+- Writing Presence again leaves a custom field as it was.
+
 ## Upsert
 
 - Asynchronous: 202, then visible in about 2 seconds.

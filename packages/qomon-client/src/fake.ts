@@ -50,6 +50,7 @@ import type {
  *    without an error when it names an unknown contact, form, or value
  *  - one answer per form: a new Presence replaces the old one, dated when
  *    the write was applied whatever date the caller sent
+ *  - custom field answers kept apart, in `custom_fields`, with no date
  *
  * CI runs the contract suite against this fake with no network. The same suite
  * runs against the sandbox when QOMON_SANDBOX=1 (see sandbox.test.ts).
@@ -459,12 +460,30 @@ export class InMemoryQomon implements QomonApi {
         answers.push(formData);
       }
     }
+    const customAnswers: QomonFormData[] = [];
+    for (const answer of upsert.custom_fields ?? []) {
+      const resolved = this.resolveAnswer(answer, upsert.id, ['custom_fields']);
+      if (!resolved) {
+        this.droppedUpserts.push(upsert);
+        return;
+      }
+      // custom field answers carry no date
+      customAnswers.push({
+        id: resolved.id,
+        form_id: resolved.form_id,
+        form_ref_id: resolved.form_ref_id,
+        data: resolved.data,
+      });
+    }
     const { id, address, ...rest } = upsert;
     const fields = Object.fromEntries(
       Object.entries(rest).filter(
-        ([k]) => !(FORM_ANSWER_KEYS as readonly string[]).includes(k),
+        ([k]) =>
+          !(FORM_ANSWER_KEYS as readonly string[]).includes(k) &&
+          k !== 'custom_fields',
       ),
     );
+    const customIds = new Set(customAnswers.map((a) => a.form_id));
     const formIds = new Set(answers.map((a) => a.form_id));
     const next: QomonContact = {
       ...current,
@@ -475,6 +494,12 @@ export class InMemoryQomon implements QomonApi {
         ...(current.formdatas ?? []).filter((f) => !formIds.has(f.form_id)),
         ...answers,
       ],
+      custom_fields: [
+        ...(current.custom_fields ?? []).filter(
+          (f) => !customIds.has(f.form_id),
+        ),
+        ...customAnswers,
+      ],
     };
     if (address !== undefined)
       next.address = { ...(current.address ?? {}), ...address };
@@ -484,8 +509,13 @@ export class InMemoryQomon implements QomonApi {
   private resolveAnswer(
     answer: QomonFormAnswer,
     contactId: number,
+    types?: QomonFormType[],
   ): QomonFormData | null {
-    const all = [...this.forms.values()].flat();
+    const all = [...this.forms.entries()]
+      .filter(([type]) =>
+        types ? types.includes(type) : type !== 'custom_fields',
+      )
+      .flatMap(([, forms]) => forms);
     const form = all.find((f) =>
       answer.id !== undefined ? f.id === answer.id : f.label === answer.label,
     );
@@ -600,12 +630,11 @@ function matchesCondition(
     throw invalidQuery('a level-2 node holds only conditions');
   if (c.attr === 'form' || c.attr === 'custom_fields') {
     const cond = c as Extract<typeof c, { form_id: number }>;
-    const answers = (contact.formdatas ?? []).filter(
-      (f) =>
-        f.form_id === cond.form_id &&
-        !f.deleted_at &&
-        (cond.form_ref_ids.length === 0 ||
-          cond.form_ref_ids.includes(f.form_ref_id ?? -1)),
+    // Qomon ignores form_ref_ids for ext and not_ext (sandbox, 2026-10-07).
+    const list =
+      c.attr === 'custom_fields' ? contact.custom_fields : contact.formdatas;
+    const answers = (list ?? []).filter(
+      (f) => f.form_id === cond.form_id && !f.deleted_at,
     );
     switch (c.ope) {
       case 'ext':

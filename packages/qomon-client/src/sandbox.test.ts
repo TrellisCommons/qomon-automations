@@ -92,6 +92,8 @@ suite('sandbox', { timeout: 120_000 }, () => {
         }
       },
       settle: () => sleep(SETTLE_MS),
+      // a single-choice custom field in the sandbox space, if it has one
+      markerField: process.env.QOMON_MARKER_FIELD || undefined,
     };
   });
 });

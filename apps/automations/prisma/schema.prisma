@@ -31,7 +31,11 @@ model Space {
   /// stored Presence values that count as a canvass and trigger the match
   canvassedValues      String[]
   /// stored Presence value written to the rest of the household
-  householdValue       String
+  householdValue       String    @default("absent")
+  /// single-choice custom field, and its stored value, written with every
+  /// household value so people (and the job) can tell it from a real knock
+  markerField          String    @default("Presence source")
+  markerValue          String    @default("household_match")
   createdAt            DateTime  @default(now())
   updatedAt            DateTime  @updatedAt
 
@@ -56,14 +60,14 @@ enum RunStatus {
 }
 
 model JobRun {
-  id         String     @id @default(cuid())
+  id         String    @id @default(cuid())
   job        String
   spaceKey   String
   kind       RunKind
   /// true when every write guard allowed writing
   applying   Boolean
-  status     RunStatus  @default(RUNNING)
-  startedAt  DateTime   @default(now())
+  status     RunStatus @default(RUNNING)
+  startedAt  DateTime  @default(now())
   finishedAt DateTime?
   /// counts only (fetched, planned, applied, verified, failed, ...), and
   /// `progress` while applying; saved after every batch
@@ -92,18 +96,21 @@ enum WriteStatus {
 
 /// One change the run decided on. The run's report is built from these.
 model PlannedWrite {
-  id               String      @id @default(cuid())
-  runId            String
-  contactId        Int
-  field            String
-  valueBefore      String?
-  valueAfter       String
+  id                  String      @id @default(cuid())
+  runId               String
+  contactId           Int
+  field               String
+  valueBefore         String?
+  valueAfter          String
   /// the canvassed contact at the same address that triggered this write
-  triggerContactId Int
-  reason           String
-  status           WriteStatus @default(PLANNED)
-  detail           String?
-  updatedAt        DateTime    @updatedAt
+  triggerContactId    Int
+  reason              String
+  status              WriteStatus @default(PLANNED)
+  /// the Presence date Qomon gave this write, read back at verification; a
+  /// later run compares it to tell this write from a re-recorded visit
+  writtenPresenceDate String?
+  detail              String?
+  updatedAt           DateTime    @updatedAt
 
   run JobRun @relation(fields: [runId], references: [id])
 

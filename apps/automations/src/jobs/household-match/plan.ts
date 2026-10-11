@@ -1,6 +1,10 @@
 import { addressKey } from '@trellis/address-match-core';
 import type { QomonContact } from '@trellis/qomon-client';
-import { presenceOf, type PresenceConfig } from './presence.js';
+import {
+  classifyPresence,
+  type OwnWrites,
+  type PresenceConfig,
+} from './presence.js';
 
 /**
  * The household match, as pure functions over a fetched space.
@@ -12,9 +16,11 @@ import { presenceOf, type PresenceConfig } from './presence.js';
  *     counts, not only voters.
  *  3. Written values are never revisited.
  *
- * A value an earlier run wrote is a Presence, so rule 1 protects it, and it
- * is not canvassed, so it never triggers rule 2. That makes the run
- * idempotent: the next run plans only what is still missing.
+ * A value an earlier run wrote is a Presence, so rule 1 protects it. The
+ * household value is a real Presence value (Qomon's list is fixed), so it is
+ * told apart from a knock by its marker and its recorded date
+ * (`classifyPresence`), and the job's own writes never trigger rule 2. That
+ * makes the run idempotent: the next run plans only what is still missing.
  */
 
 export interface PlannedHouseholdWrite {
@@ -88,6 +94,7 @@ export function planHouseholdMatch(
   contacts: readonly QomonContact[],
   presence: PresenceConfig,
   municipality: string | null,
+  ownWrites: OwnWrites = new Map(),
 ): Plan {
   const stats: PlanStats = {
     fetched: contacts.length,
@@ -121,10 +128,10 @@ export function planHouseholdMatch(
   for (const members of households.values()) {
     const withPresence = members.map((c) => ({
       id: c.id!,
-      presence: presenceOf(c, presence.form),
+      ...classifyPresence(c, presence, ownWrites),
     }));
     const triggers = withPresence
-      .filter((m) => m.presence && presence.canvassed.has(m.presence.value))
+      .filter((m) => m.kind === 'canvassed')
       .map((m) => ({
         id: m.id,
         value: m.presence!.value,
@@ -135,7 +142,7 @@ export function planHouseholdMatch(
     if (!trigger) continue;
     stats.canvassedHouseholds += 1;
     for (const member of withPresence) {
-      if (member.presence) {
+      if (member.kind !== 'none') {
         if (member.id !== trigger.id) stats.alreadyHavePresence += 1;
         continue;
       }

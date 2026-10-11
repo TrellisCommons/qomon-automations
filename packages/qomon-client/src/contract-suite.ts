@@ -35,6 +35,9 @@ export interface ContractHarness {
   eventually<T>(check: () => Promise<T | undefined>): Promise<T>;
   /** wait long enough that an upsert Qomon accepted would be visible. */
   settle(): Promise<void>;
+  /** a single-choice custom field the space has for marking writes; the
+   *  marker tests are skipped without one */
+  markerField?: string;
 }
 
 /** Unique per call, so a contract run never matches an existing contact. */
@@ -318,6 +321,76 @@ export function runQomonContractSuite(
       const answer = found!.formdatas?.find((f) => f.form_id === form!.id);
       expect(answer?.form_ref_id).toBe(form!.refvalues[0]!.id);
       expect(typeof answer?.date).toBe('string');
+    });
+
+    it('writes Presence and a custom field in one upsert; a later Presence write keeps the field', async () => {
+      const h = await setup();
+      if (!h.markerField) return;
+      const [form] = await h.api.listFormsByType('presence_status');
+      const field = (await h.api.listFormsByType('custom_fields')).find(
+        (f) => f.label === h.markerField,
+      );
+      expect(field, `custom field ${h.markerField}`).toBeDefined();
+      const marker = field!.refvalues[0]!;
+      const id = await h.makeContact({ surname: disposableName('Marker') });
+      await h.api.upsertContact({
+        id,
+        name_presences: [{ id: form!.id, value: form!.refvalues[0]!.value! }],
+        custom_fields: [{ id: field!.id, value: marker.value! }],
+      });
+      const first = await h.eventually(async () => {
+        const c = await h.api.getContact(id);
+        const answer = c.custom_fields?.find((f) => f.form_id === field!.id);
+        return answer && c.formdatas?.some((f) => f.form_id === form!.id)
+          ? c
+          : undefined;
+      });
+      const answer = first.custom_fields!.find((f) => f.form_id === field!.id)!;
+      expect(answer.form_ref_id).toBe(marker.id);
+      expect(answer.date ?? null).toBeNull();
+      const firstDate = first.formdatas!.find(
+        (f) => f.form_id === form!.id,
+      )!.date;
+
+      // a canvasser records Presence again: the field stays, the date moves
+      await new Promise((r) => setTimeout(r, 1_100));
+      await h.api.upsertContact({
+        id,
+        name_presences: [{ id: form!.id, value: form!.refvalues[1]!.value! }],
+      });
+      const second = await h.eventually(async () => {
+        const c = await h.api.getContact(id);
+        const p = c.formdatas?.find((f) => f.form_id === form!.id);
+        return p?.form_ref_id === form!.refvalues[1]!.id ? c : undefined;
+      });
+      expect(
+        second.custom_fields?.find((f) => f.form_id === field!.id)?.form_ref_id,
+      ).toBe(marker.id);
+      expect(
+        second.formdatas!.find((f) => f.form_id === form!.id)!.date,
+      ).not.toBe(firstDate);
+    });
+
+    it('drops Presence too when the custom field value is unknown', async () => {
+      const h = await setup();
+      if (!h.markerField) return;
+      const [form] = await h.api.listFormsByType('presence_status');
+      const field = (await h.api.listFormsByType('custom_fields')).find(
+        (f) => f.label === h.markerField,
+      );
+      const id = await h.makeContact({ surname: disposableName('BadMarker') });
+      await h.api.upsertContact({
+        id,
+        name_presences: [{ id: form!.id, value: form!.refvalues[0]!.value! }],
+        custom_fields: [
+          { id: field!.id, value: disposableName('not-a-value') },
+        ],
+      });
+      await h.settle();
+      const after = await h.api.getContact(id);
+      expect(
+        after.formdatas?.some((f) => f.form_id === form!.id) ?? false,
+      ).toBe(false);
     });
 
     it('upsert drops a record with an unknown form value, without an error', async () => {

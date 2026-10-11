@@ -209,6 +209,9 @@ export const QomonContact = z
     black_list: z.boolean().optional(),
     /** Answers to every form except custom fields; Presence is one of them. */
     formdatas: z.array(QomonFormData).nullish(),
+    /** Answers to custom fields. Unlike formdatas, these carry no date
+     *  (test space, 2026-10-11). */
+    custom_fields: z.array(QomonFormData).nullish(),
   })
   .passthrough();
 export type QomonContact = z.infer<typeof QomonContact>;

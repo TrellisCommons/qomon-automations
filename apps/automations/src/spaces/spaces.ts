@@ -47,7 +47,12 @@ export interface SpaceConfig {
   activeUntil?: Date | null;
   municipality?: string | null;
   canvassedValues: string[];
-  householdValue: string;
+  /** default "absent" */
+  householdValue?: string;
+  /** default "Presence source" */
+  markerField?: string;
+  /** default "household_match" */
+  markerValue?: string;
 }
 
 /** Without the API key, `config` is the key, name, and match settings only;
