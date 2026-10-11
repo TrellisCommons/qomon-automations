@@ -18,7 +18,7 @@ Locally, `pnpm build` then `pnpm job <command>` with a `.env` (see `.env.example
 
 ## Before the first run
 
-1. **Create the marker field in Qomon**: a custom field labelled `Presence source`, **single choice**, with two options: "Household match" (`household_match`) and "Canvassed after household match" (`recanvassed`). The job refuses to run without it. (Qomon's Presence values cannot be extended, so the job writes `absent` and marks it with this field.)
+1. **Create the marker field in Qomon**: a custom field labelled `Presence source`, **single choice**, with two options: "Household match" (`household_match`) and "Recanvassed" (`recanvassed`). The job uses the stored values; the labels are free. The job refuses to run without it. (Qomon's Presence values cannot be extended, so the job writes `absent` and marks it with this field.)
 2. **Add the space.** The API key comes from stdin, so it is not in shell history:
 
    ```bash
