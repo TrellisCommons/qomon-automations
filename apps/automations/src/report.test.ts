@@ -46,6 +46,7 @@ describe('shadow report', () => {
       runId: string,
       contactId: number,
       status: 'PLANNED' | 'VERIFIED',
+      knockedAt = '2026-10-11T12:10:00Z',
     ) =>
       prisma.plannedWrite.create({
         data: {
@@ -54,7 +55,7 @@ describe('shadow report', () => {
           field: 'presence',
           valueAfter: 'absent',
           triggerContactId: 1,
-          reason: 'test',
+          reason: `household of contact 1 (present at ${knockedAt})`,
           status,
         },
       });
@@ -63,6 +64,8 @@ describe('shadow report', () => {
     const inc = await run('INCREMENTAL', '2026-10-11T12:30:00Z');
     await write(full.id, 101, 'VERIFIED');
     await write(full.id, 102, 'VERIFIED');
+    // knocked after the last incremental run before the full run
+    await write(full.id, 104, 'VERIFIED', '2026-10-11T12:59:30Z');
     await write(before.id, 103, 'VERIFIED');
     await write(inc.id, 101, 'PLANNED');
 
@@ -73,7 +76,7 @@ describe('shadow report', () => {
         new Date('2026-10-11T12:00:00Z'),
       ),
     ).toBe(
-      'since 2026-10-11T12:00:00.000Z: full runs wrote 2 household values; incremental runs planned 1 of them\nmissed 1: 102',
+      'since 2026-10-11T12:00:00.000Z: full runs wrote 3 household values; incremental runs planned 1, missed 1, and 1 were written before an incremental run could see them\nmissed: 102',
     );
   });
 });

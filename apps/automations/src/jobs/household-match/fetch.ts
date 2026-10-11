@@ -1,5 +1,6 @@
 import {
   collectContacts,
+  paginateContacts,
   type QomonApi,
   type QomonContact,
   type SearchCondition,
@@ -31,7 +32,7 @@ export interface Fetched {
   streets?: number;
   /** why an incremental run fetched everything instead */
   fallback?: string;
-  /** when the first search was sent: the next cursor once the run settles */
+  /** when the first search was sent: the next run's cursor */
   searchedAt: Date;
 }
 
@@ -46,11 +47,12 @@ export interface FetchOptions {
 
 /**
  * The contacts a run plans over. A full run fetches the whole space. An
- * incremental run fetches the contacts changed since the cursor, then every
- * contact on the streets of those that could start or join a household
- * match, so each household it plans over is complete. Qomon moves
- * `UpdatedAt` on any change, a canvasser's Presence included, and search can
- * filter on it (2026-10-11).
+ * incremental run fetches the contacts changed since the cursor, then
+ * searches the streets of those that could start or join a household match
+ * and keeps only the members of their households, so each household it plans
+ * over is as complete as the street search finds it. Qomon moves `UpdatedAt`
+ * on any change, a canvasser's Presence included, and search can filter on
+ * it (2026-10-11).
  */
 export async function fetchContacts(
   qomon: Pick<QomonApi, 'searchContacts'>,
@@ -67,10 +69,19 @@ export async function fetchContacts(
   if (!opts.cursor) return full('no cursor yet');
 
   const since = new Date(opts.cursor.getTime() - CURSOR_OVERLAP_MS);
-  const changed = await collectContacts(qomon, changedSinceQuery(since));
-  if (changed.length > MAX_CHANGED)
-    return full(`${changed.length} contacts changed, over ${MAX_CHANGED}`);
+  const changed: QomonContact[] = [];
+  for await (const contact of paginateContacts(
+    qomon,
+    changedSinceQuery(since),
+  )) {
+    changed.push(contact);
+    // a bulk change: stop paying for it page by page
+    if (changed.length > MAX_CHANGED)
+      return full(`more than ${MAX_CHANGED} contacts changed`);
+  }
 
+  const byId = new Map<number, QomonContact>();
+  const households = new Set<string>();
   const streets = new Map<string, Set<string>>();
   for (const contact of changed) {
     // the job's own writes change nothing about their household
@@ -79,21 +90,23 @@ export async function fetchContacts(
       'written'
     )
       continue;
+    if (contact.id !== undefined) byId.set(contact.id, contact);
     if (!inMunicipality(contact, opts.municipality)) continue;
     const key = householdKeyOf(contact);
     const stem = streetStem(contact.address?.street ?? '');
     if (key === null || stem === null) continue;
+    households.add(key);
     const numbers = streets.get(stem) ?? new Set<string>();
     numbers.add(streetNumberOf(key));
     streets.set(stem, numbers);
   }
 
-  const byId = new Map<number, QomonContact>();
-  for (const contact of changed)
-    if (contact.id !== undefined) byId.set(contact.id, contact);
   for (const query of streetQueries(streets)) {
-    for (const contact of await collectContacts(qomon, query))
-      if (contact.id !== undefined) byId.set(contact.id, contact);
+    for (const contact of await collectContacts(qomon, query)) {
+      const key = householdKeyOf(contact);
+      if (contact.id !== undefined && key !== null && households.has(key))
+        byId.set(contact.id, contact);
+    }
   }
   return {
     contacts: [...byId.values()],

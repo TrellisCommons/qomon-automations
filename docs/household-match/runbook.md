@@ -94,7 +94,7 @@ Each run posts to Slack only when something went wrong: a write failed, the run 
 
 ## Every minute
 
-An incremental run (`--incremental`) fetches only contacts changed since the space's cursor and their streets, so it can run every minute; [the design doc](design.md) has how. The full run stays, once a night, to catch what incremental runs miss.
+An incremental run (`--incremental`) fetches only contacts changed since the space's cursor and their streets, so it can run every minute; [the design doc](design.md) has how. The hourly full run stays: it catches what incremental runs miss and retries what they left undone.
 
 1. **Shadow it** for a day: incremental dry runs every minute while the hourly full run keeps writing. The override drops `--apply`:
 
@@ -118,23 +118,15 @@ An incremental run (`--incremental`) fetches only contacts changed since the spa
    job shadow --space <space-key> --since <when the shadow started, ISO>
    ```
 
-   A missed contact id is one an incremental run never planned. Look it up: a street whose spelling starts with a different word is the expected cause.
-3. **Switch.** Remove the override, so incremental runs apply, and move the full run to once a night:
+   A write counts as missed only when an incremental run started after its trigger's knock and before the full run; writes the full run got to first are counted separately. Look up a missed contact id: a housemate whose street starts with a different word is the expected cause, and a knock synced long after it was recorded can also read as a miss.
+3. **Switch.** Remove the override, so incremental runs apply:
 
    ```bash
    systemctl revert qomon-household-match-incremental@<space-key>.service
-   systemctl edit qomon-household-match@<space-key>.timer
+   systemctl restart qomon-household-match-incremental@<space-key>.timer
    ```
 
-   ```ini
-   [Timer]
-   OnCalendar=
-   OnCalendar=*-*-* 03:00:00 America/Toronto
-   ```
-
-   Then `systemctl restart qomon-household-match@<space-key>.timer qomon-household-match-incremental@<space-key>.timer`.
-
-`job status` shows each run's `fetched` line: `full`, or how many contacts changed and how many streets were searched, and why a run fell back to a full fetch. A failed run posts to Slack only when the run before it did not fail, so an outage posts once; with a health check, set its period to a minute.
+`job status` shows each run's `fetched` line: `full`, or how many contacts changed and how many streets were searched, and why a run fell back to a full fetch. A failed run is not posted again while runs of the same kind keep failing with the same error, so an outage posts once. Incremental runs ping `HEALTHCHECK_URL_INCREMENTAL` (period a minute) and full runs `HEALTHCHECK_URL` (period an hour), each in `/etc/qomon-automations/.env`. A full run waits up to 10 minutes for an incremental run's lock; if it never gets it, it posts to Slack and exits 1.
 
 ## When a breaker trips
 

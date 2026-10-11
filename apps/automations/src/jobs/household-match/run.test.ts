@@ -435,12 +435,32 @@ describe('household match run', () => {
     expect(await prisma.jobRun.count()).toBe(0);
   });
 
-  it('exits when another run holds the lock', async () => {
+  it('an incremental run exits when another run holds the lock', async () => {
     await makeSpace(prisma);
     expect(
-      await runHouseholdMatch(deps({ lock: async () => null }), hourly),
+      await runHouseholdMatch(deps({ lock: async () => null }), {
+        ...hourly,
+        incremental: true,
+      }),
     ).toEqual({ status: 'locked' });
     expect(await prisma.jobRun.count()).toBe(0);
+  });
+
+  it('a full run waits for the lock, and fails loudly if it never comes', async () => {
+    await makeSpace(prisma);
+    let tries = 0;
+    const freedOnThirdTry = deps({
+      lock: async () => (++tries >= 3 ? { release: async () => {} } : null),
+    });
+    expect(await runHouseholdMatch(freedOnThirdTry, hourly)).toMatchObject({
+      status: 'SUCCEEDED',
+    });
+
+    const held = deps({ lock: async () => null });
+    await expect(runHouseholdMatch(held, hourly)).rejects.toThrow(
+      'this full run did not run',
+    );
+    expect(held.notify).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -511,7 +531,7 @@ describe('incremental runs', () => {
         scope: 'incremental',
         changed: 1,
         streets: 1,
-        fetched: 3,
+        fetched: 2,
         planned: 1,
         verified: 1,
       },
@@ -541,17 +561,42 @@ describe('incremental runs', () => {
     });
   });
 
-  it('keeps the cursor while planned writes are unwritten, and moves it once nothing is left', async () => {
+  it('moves the cursor once it has planned, even when nothing is written', async () => {
     await makeSpace(prisma, { changedCursor: CURSOR });
-    const cursor = async () =>
-      (await prisma.space.findUniqueOrThrow({ where: { key: 'test-space' } }))
-        .changedCursor;
-
     await runHouseholdMatch(deps(), { ...incremental, apply: false });
-    expect(await cursor()).toEqual(CURSOR);
+    const space = await prisma.space.findUniqueOrThrow({
+      where: { key: 'test-space' },
+    });
+    expect(space.changedCursor).toEqual(new Date('2026-10-10T12:00:00Z'));
+  });
 
-    await runHouseholdMatch(deps(), incremental);
-    expect(await cursor()).toEqual(new Date('2026-10-10T12:00:00Z'));
+  it('keeps the cursor when the run fails before planning', async () => {
+    await makeSpace(prisma, { changedCursor: CURSOR });
+    const down = withOverrides({
+      searchContacts: async () => {
+        throw new Error('Qomon is down');
+      },
+    });
+    await runHouseholdMatch(deps({ api: down }), incremental);
+    const space = await prisma.space.findUniqueOrThrow({
+      where: { key: 'test-space' },
+    });
+    expect(space.changedCursor).toEqual(CURSOR);
+  });
+
+  it('plans only over the changed households, not their whole streets', async () => {
+    qomon.seedContact({
+      firstname: 'Gi',
+      address: { housenumber: '12', street: 'Sampleton Ave' },
+      UpdatedAt: OLD,
+    });
+    await makeSpace(prisma, { changedCursor: CURSOR });
+    const result = await runHouseholdMatch(deps(), {
+      ...incremental,
+      apply: false,
+    });
+    // the knock and its housemate; not 14 Sample Rd or 12 Sampleton Ave
+    expect(result).toMatchObject({ stats: { fetched: 2, planned: 1 } });
   });
 
   it('falls back to a full fetch when too many contacts changed', async () => {
@@ -573,7 +618,7 @@ describe('incremental runs', () => {
       apply: false,
     });
     expect(result).toMatchObject({
-      stats: { scope: 'full', fallback: '2001 contacts changed, over 2000' },
+      stats: { scope: 'full', fallback: 'more than 2000 contacts changed' },
     });
   });
 
@@ -582,6 +627,20 @@ describe('incremental runs', () => {
     await expect(
       runHouseholdMatch(deps(), { ...incremental, backfill: true }),
     ).rejects.toThrow(UsageError);
+  });
+
+  it('posts a failure again when the error changes', async () => {
+    await makeSpace(prisma, { changedCursor: CURSOR });
+    let n = 0;
+    const flaky = withOverrides({
+      searchContacts: async () => {
+        throw new Error(++n === 1 ? 'Qomon is down' : 'something else');
+      },
+    });
+    const d = deps({ api: flaky });
+    await runHouseholdMatch(d, incremental);
+    await runHouseholdMatch(d, incremental);
+    expect(d.notify).toHaveBeenCalledTimes(2);
   });
 
   it('posts the first of a run of failures, not every one', async () => {

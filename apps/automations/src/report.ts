@@ -115,44 +115,72 @@ export async function runStatus(
     .join('\n');
 }
 
+/** How long after a knock an incremental run can be expected to see it:
+ *  Qomon's search trails a write by a few seconds. */
+const SEARCH_LAG_MS = 60_000;
+
 /**
- * For moving a space to incremental runs: of the household values that full
- * runs wrote since `since`, how many an incremental run (a dry run, while
- * both run) had planned too. An incremental run plans over whole households
- * from a subset of the space, so it can miss a write but never add one.
+ * For moving a space to incremental runs: of the household values that
+ * hourly full runs wrote since `since`, how many an incremental run (a dry
+ * run, while both run) had planned too. An incremental run plans over whole
+ * households from a subset of the space, so it can miss a write but never add
+ * one. A write counts as missed only when an incremental run started after
+ * its trigger's Presence date (plus search lag) and before the full run;
+ * otherwise the full run simply got there first. A knock synced long after
+ * it was recorded can still read as a miss.
  */
 export async function shadowReport(
   prisma: PrismaClient,
   spaceKey: string,
   since: Date,
 ): Promise<string> {
-  const inWindow = { spaceKey, startedAt: { gte: since } };
   const written = await prisma.plannedWrite.findMany({
     where: {
       status: 'VERIFIED',
       field: 'presence',
-      run: { ...inWindow, kind: { not: 'INCREMENTAL' } },
+      run: { spaceKey, kind: 'HOURLY', startedAt: { gte: since } },
     },
-    select: { contactId: true },
+    select: {
+      contactId: true,
+      reason: true,
+      run: { select: { startedAt: true } },
+    },
+  });
+  const incremental = await prisma.jobRun.findMany({
+    where: { spaceKey, kind: 'INCREMENTAL', startedAt: { gte: since } },
+    select: { startedAt: true },
   });
   const planned = new Set(
     (
       await prisma.plannedWrite.findMany({
-        where: { field: 'presence', run: { ...inWindow, kind: 'INCREMENTAL' } },
+        where: {
+          field: 'presence',
+          run: { spaceKey, kind: 'INCREMENTAL', startedAt: { gte: since } },
+        },
         select: { contactId: true },
         distinct: ['contactId'],
       })
     ).map((w) => w.contactId),
   );
-  const missed = written
-    .map((w) => w.contactId)
-    .filter((id) => !planned.has(id))
-    .sort((a, b) => a - b);
+  const missed: number[] = [];
+  let tooClose = 0;
+  for (const w of written) {
+    if (planned.has(w.contactId)) continue;
+    const knock = Date.parse(/ at (\S+)\)$/.exec(w.reason)?.[1] ?? '');
+    const sawIt = incremental.some(
+      (r) =>
+        r.startedAt.getTime() >= knock + SEARCH_LAG_MS &&
+        r.startedAt < w.run.startedAt,
+    );
+    if (sawIt) missed.push(w.contactId);
+    else tooClose += 1;
+  }
+  missed.sort((a, b) => a - b);
   return [
-    `since ${since.toISOString()}: full runs wrote ${written.length} household values; incremental runs planned ${written.length - missed.length} of them`,
+    `since ${since.toISOString()}: full runs wrote ${written.length} household values; incremental runs planned ${written.length - missed.length - tooClose}, missed ${missed.length}, and ${tooClose} were written before an incremental run could see them`,
     ...(missed.length
       ? [
-          `missed ${missed.length}: ${missed.slice(0, 20).join(', ')}${missed.length > 20 ? ', ...' : ''}`,
+          `missed: ${missed.slice(0, 20).join(', ')}${missed.length > 20 ? ', ...' : ''}`,
         ]
       : []),
   ].join('\n');

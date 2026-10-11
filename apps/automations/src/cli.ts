@@ -304,7 +304,10 @@ async function householdMatch(
     return exitCodeFor(result);
   } finally {
     const ok = result !== undefined && exitCodeFor(result) === 0;
-    await pingHealthcheck(env, ok).catch((err) =>
+    const url = values.incremental
+      ? env.HEALTHCHECK_URL_INCREMENTAL
+      : env.HEALTHCHECK_URL;
+    await pingHealthcheck({ ...env, HEALTHCHECK_URL: url }, ok).catch((err) =>
       log.warn({ err: String(err) }, 'health check ping failed'),
     );
   }

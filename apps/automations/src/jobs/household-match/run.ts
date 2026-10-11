@@ -5,6 +5,7 @@ import type {
   JobRun,
   Prisma,
   PrismaClient,
+  RunKind,
   RunStatus,
   Space,
 } from '../../generated/prisma/index.js';
@@ -31,6 +32,10 @@ const BATCH_SIZE = 20;
 /** PlannedWrite.field of a marker change; household values are 'presence' */
 const REMARK_FIELD = 'presence_source';
 const VERIFY_POLL_MS = 3_000;
+/** A full run waits this long for an incremental run to let go of the lock;
+ *  an incremental run never waits, since the next one is a minute away. */
+const LOCK_WAIT_MS = 10 * 60_000;
+const LOCK_POLL_MS = 5_000;
 
 export interface RunOptions {
   spaceKey: string;
@@ -127,8 +132,15 @@ export async function runHouseholdMatch(
     );
   }
 
-  const lock = await deps.lock(`${JOB}:${space.key}`);
+  const lock = await acquireLock(deps, `${JOB}:${space.key}`, opts);
   if (!lock) {
+    if (!opts.incremental) {
+      const message = `another run held the lock for ${LOCK_WAIT_MS / 60_000} minutes; this full run did not run`;
+      await deps
+        .notify(`:rotating_light: ${JOB} on space \`${space.key}\`: ${message}`)
+        .catch(() => {});
+      throw new Error(message);
+    }
     log.warn('another run holds the lock; exiting');
     return { status: 'locked' };
   }
@@ -137,11 +149,7 @@ export async function runHouseholdMatch(
     data: {
       job: JOB,
       spaceKey: space.key,
-      kind: opts.backfill
-        ? 'BACKFILL'
-        : opts.incremental
-          ? 'INCREMENTAL'
-          : 'HOURLY',
+      kind: runKindOf(opts),
       applying: mode.applying,
     },
   });
@@ -221,13 +229,6 @@ async function execute(
     });
   if (fetched.fallback) stats.fallback = fetched.fallback;
   if (deps.signal?.aborted) return interrupt(deps, run, log);
-  // Once a run has written everything it planned (or planned nothing),
-  // contacts changed before its search need no second look.
-  const settle = () =>
-    deps.prisma.space.update({
-      where: { key: space.key },
-      data: { changedCursor: fetched.searchedAt },
-    });
   const plan = planHouseholdMatch(
     contacts,
     presence,
@@ -258,7 +259,7 @@ async function execute(
         valueBefore: null,
         valueAfter: presence.household.value,
         triggerContactId: w.triggerContactId,
-        reason: `household of contact ${w.triggerContactId} (${w.triggerValue}${w.triggerDate ? ` on ${w.triggerDate.slice(0, 10)}` : ''})`,
+        reason: `household of contact ${w.triggerContactId} (${w.triggerValue}${w.triggerDate ? ` at ${w.triggerDate}` : ''})`,
       })),
     });
   }
@@ -276,11 +277,15 @@ async function execute(
     });
   }
 
-  if (total === 0) {
-    await settle();
-    return 'SUCCEEDED';
-  }
-  if (!applying) return 'SUCCEEDED';
+  // The cursor moves once a run has planned, whether or not its writes land:
+  // a write left undone (a dry run, writes off, a failure, a trip) is the
+  // next full run's, so a stuck write never holds incremental runs back.
+  await deps.prisma.space.update({
+    where: { key: space.key },
+    data: { changedCursor: fetched.searchedAt },
+  });
+
+  if (!applying || total === 0) return 'SUCCEEDED';
   if (deps.signal?.aborted) return interrupt(deps, run, log);
 
   if (total > limit) {
@@ -301,7 +306,7 @@ async function execute(
   }
 
   const keys = new Map(contacts.map((c) => [c.id, householdKeyOf(c)]));
-  const status = await applyAndVerify(
+  return applyAndVerify(
     deps,
     qomon,
     space,
@@ -312,10 +317,6 @@ async function execute(
     stats,
     log,
   );
-  // a failed write leaves its contact unchanged in Qomon, so only a search
-  // from before this run finds it again
-  if (status === 'SUCCEEDED' && !stats.failed) await settle();
-  return status;
 }
 
 async function applyAndVerify(
@@ -561,8 +562,9 @@ async function finish(
 /** Slack hears about a run only when something went wrong: a write failed,
  *  or the run failed or tripped. Successful runs, and runs stopped on
  *  purpose, send nothing; the health check catches a run that stops
- *  reporting altogether. A failed run posts only when the run before it did
- *  not fail, so an outage under a run every minute posts once. */
+ *  reporting altogether. A failed run is not posted when the previous run of
+ *  the same kind failed with the same error, so an outage under a run every
+ *  minute posts once. */
 async function report(
   deps: RunDeps,
   space: Space,
@@ -579,7 +581,7 @@ async function report(
   if (!failed) return;
   if (
     result.status === 'FAILED' &&
-    (await previousRunFailed(deps, space, result.runId))
+    (await repeatsPreviousFailure(deps, space, opts, result))
   )
     return;
   const lines = [
@@ -592,7 +594,9 @@ async function report(
       : []),
     ...(result.error ? [`error: ${result.error}`] : []),
     ...(result.status === 'FAILED'
-      ? ['Failed runs after this one are not posted until a run gets through.']
+      ? [
+          'Runs of this kind that fail the same way are not posted until one gets through.',
+        ]
       : []),
     `run \`${result.runId}\``,
   ];
@@ -711,17 +715,48 @@ async function reconcileAbandoned(
   return reconciled;
 }
 
-async function previousRunFailed(
+async function repeatsPreviousFailure(
   deps: RunDeps,
   space: Space,
-  runId: string,
+  opts: RunOptions,
+  result: { runId: string; error?: string },
 ): Promise<boolean> {
   const previous = await deps.prisma.jobRun.findFirst({
-    where: { job: JOB, spaceKey: space.key, id: { not: runId } },
+    where: {
+      job: JOB,
+      spaceKey: space.key,
+      kind: runKindOf(opts),
+      id: { not: result.runId },
+    },
     orderBy: { startedAt: 'desc' },
-    select: { status: true },
+    select: { status: true, error: true },
   });
-  return previous?.status === 'FAILED';
+  return (
+    previous?.status === 'FAILED' && previous.error === (result.error ?? null)
+  );
+}
+
+function runKindOf(opts: RunOptions): RunKind {
+  return opts.backfill
+    ? 'BACKFILL'
+    : opts.incremental
+      ? 'INCREMENTAL'
+      : 'HOURLY';
+}
+
+async function acquireLock(
+  deps: RunDeps,
+  name: string,
+  opts: RunOptions,
+): Promise<HeldLock | null> {
+  const sleep =
+    deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  for (let waited = 0; ; waited += LOCK_POLL_MS) {
+    const lock = await deps.lock(name);
+    if (lock || opts.incremental || waited >= LOCK_WAIT_MS) return lock;
+    if (waited === 0) deps.log.info('another run holds the lock; waiting');
+    await sleep(LOCK_POLL_MS);
+  }
 }
 
 function statsJson(stats: Partial<RunStats>): Prisma.InputJsonValue {
