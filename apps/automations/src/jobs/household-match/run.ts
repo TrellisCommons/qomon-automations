@@ -300,7 +300,6 @@ async function applyAndVerify(
 
   const startedAt = now().getTime();
   if (stats.reconciled === undefined) stats.reconciled = 0;
-  await announceBackfill(deps, space, run, writes.length, log);
   let done = 0;
   for (let i = 0; i < writes.length; i += BATCH_SIZE) {
     const sent: typeof writes = [];
@@ -506,8 +505,10 @@ async function finish(
   return { status, runId: run.id, applying: run.applying, stats, error };
 }
 
-/** Slack hears about a run only when something happened: writes applied, a
- *  write failed, or the run failed or tripped. Quiet hours send nothing. */
+/** Slack hears about a run only when something went wrong: a write failed,
+ *  or the run failed or tripped. Successful runs, and runs stopped on
+ *  purpose, send nothing; the health check catches a run that stops
+ *  reporting altogether. */
 async function report(
   deps: RunDeps,
   space: Space,
@@ -517,19 +518,13 @@ async function report(
 ): Promise<void> {
   if (!('runId' in result)) return;
   const s = result.stats;
-  const eventful =
-    (s.applied ?? 0) > 0 ||
+  const failed =
     (s.failed ?? 0) > 0 ||
     result.status === 'FAILED' ||
-    result.status === 'INTERRUPTED' ||
     result.status === 'TRIPPED';
-  if (!eventful) return;
-  const icon =
-    result.status === 'SUCCEEDED' && !(s.failed ?? 0)
-      ? ':white_check_mark:'
-      : ':rotating_light:';
+  if (!failed) return;
   const lines = [
-    `${icon} ${JOB}${opts.backfill ? ' (backfill)' : ''} on space \`${space.key}\`: ${result.status}`,
+    `:rotating_light: ${JOB}${opts.backfill ? ' (backfill)' : ''} on space \`${space.key}\`: ${result.status}`,
     `planned ${s.planned ?? 0} · applied ${s.applied ?? 0} · verified ${s.verified ?? 0} · failed ${s.failed ?? 0} · skipped ${s.skipped ?? 0} · unkeyable ${s.unkeyable ?? 0}`,
     ...(result.status === 'TRIPPED' && !opts.backfill
       ? [
@@ -652,29 +647,6 @@ async function reconcileAbandoned(
     );
   }
   return reconciled;
-}
-
-/** Backfills take long enough that people want to know one has started and
- *  roughly when it ends. Each write costs about three requests. */
-async function announceBackfill(
-  deps: RunDeps,
-  space: Space,
-  run: JobRun,
-  total: number,
-  log: Logger,
-): Promise<void> {
-  if (run.kind !== 'BACKFILL') return;
-  const minutes = Math.ceil((total * 3) / deps.env.QOMON_RPS / 60);
-  try {
-    await deps.notify(
-      `:hourglass_flowing_sand: ${JOB} backfill on space \`${space.key}\` started: ${total} writes, about ${minutes} min. Progress: \`pnpm job status --space ${space.key}\`. Run \`${run.id}\``,
-    );
-  } catch (err) {
-    log.error(
-      { err: err instanceof Error ? err.message : String(err) },
-      'Slack alert failed',
-    );
-  }
 }
 
 function statsJson(stats: Partial<RunStats>): Prisma.InputJsonValue {

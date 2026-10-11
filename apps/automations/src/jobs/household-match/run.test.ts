@@ -174,7 +174,8 @@ describe('household match run', () => {
       actor: 'household-match',
       before: { presence: null },
     });
-    expect(d.notify).toHaveBeenCalledOnce();
+    // a successful run, writes or not, posts nothing
+    expect(d.notify).not.toHaveBeenCalled();
   });
 
   it('records the Presence date each write got, for telling its writes from later knocks', async () => {
@@ -197,10 +198,15 @@ describe('household match run', () => {
         ...rest
       }: Parameters<QomonApi['upsertContact']>[0]) => qomon.upsertContact(rest),
     });
-    const result = await runHouseholdMatch(deps({ api }), hourly);
+    const d = deps({ api });
+    const result = await runHouseholdMatch(d, hourly);
     expect(result).toMatchObject({
+      status: 'SUCCEEDED',
       stats: { applied: 2, verified: 0, failed: 2 },
     });
+    // failed writes are what Slack is for, even when the run itself succeeds
+    expect(d.notify).toHaveBeenCalledOnce();
+    expect(d.notify.mock.calls[0]![0]).toMatch(/failed 2/);
     expect(
       (
         await prisma.plannedWrite.findFirstOrThrow({
@@ -451,13 +457,19 @@ describe('progress and restarts', () => {
     );
   });
 
-  it('a backfill announces its size and rough duration', async () => {
+  it('a successful backfill posts nothing to Slack', async () => {
     await makeSpace(prisma);
     const d = deps();
-    await runHouseholdMatch(d, { ...hourly, backfill: true, maxWrites: 10 });
-    expect(d.notify.mock.calls[0]![0]).toMatch(
-      /backfill on space `test-space` started: 2 writes, about 1 min/,
-    );
+    const result = await runHouseholdMatch(d, {
+      ...hourly,
+      backfill: true,
+      maxWrites: 10,
+    });
+    expect(result).toMatchObject({
+      status: 'SUCCEEDED',
+      stats: { verified: 2 },
+    });
+    expect(d.notify).not.toHaveBeenCalled();
   });
 
   it('stops cleanly on a signal: verifies what was sent, and the next run does the rest', async () => {
@@ -469,10 +481,10 @@ describe('progress and restarts', () => {
         stop.abort();
       },
     });
-    const first = await runHouseholdMatch(
-      deps({ api, signal: stop.signal }),
-      hourly,
-    );
+    const stopped = deps({ api, signal: stop.signal });
+    const first = await runHouseholdMatch(stopped, hourly);
+    // a stop on purpose is not a failure
+    expect(stopped.notify).not.toHaveBeenCalled();
     expect(first).toMatchObject({
       status: 'INTERRUPTED',
       stats: { applied: 1, verified: 1 },
