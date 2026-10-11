@@ -31,9 +31,10 @@ const USAGE = `Usage: pnpm job <command> [options]
   report --run <id> --out <file.csv>     A run's planned writes (contact ids only)
   space:add --key <key> --name <name> --canvassed <v1,v2,...>
             [--household-value <v>] [--marker-field <label>] [--marker-value <v>]
+            [--recanvassed-value <v>]
             [--municipality <city>] [--active-until <ISO date>] [--api-base <url>]
       Defaults: household value "absent", marker field "Presence source" with
-      "household_match".
+      "household_match", re-marked "recanvassed" once a person visits.
       Create or update a space. A new space reads its Qomon API key from stdin.
   space:check --key <key>                Read-only: check the config against Qomon's Presence form
   space:show --key <key>                 Print a space's config (never its API key)
@@ -101,6 +102,7 @@ async function main(argv: string[]): Promise<number> {
       'household-value': { type: 'string' },
       'marker-field': { type: 'string' },
       'marker-value': { type: 'string' },
+      'recanvassed-value': { type: 'string' },
       municipality: { type: 'string' },
       'active-until': { type: 'string' },
       'api-base': { type: 'string' },
@@ -161,6 +163,7 @@ async function main(argv: string[]): Promise<number> {
             householdValue: values['household-value'],
             markerField: values['marker-field'],
             markerValue: values['marker-value'],
+            recanvassedValue: values['recanvassed-value'],
           },
           actorName(),
         );
@@ -187,7 +190,7 @@ async function main(argv: string[]): Promise<number> {
         );
         const config = await loadPresenceConfig(qomon, space);
         console.log(
-          `space ${space.key}: canvassed values and household value ${JSON.stringify(config.household.value)} are on the Presence form, and custom field ${JSON.stringify(config.marker.form.label)} has ${JSON.stringify(config.marker.value.value)}`,
+          `space ${space.key}: canvassed values and household value ${JSON.stringify(config.household.value)} are on the Presence form, and custom field ${JSON.stringify(config.marker.form.label)} has ${JSON.stringify(config.marker.value.value)} and ${JSON.stringify(config.marker.recanvassed.value)}`,
         );
         return 0;
       }

@@ -18,7 +18,7 @@ Locally, `pnpm build` then `pnpm job <command>` with a `.env` (see `.env.example
 
 ## Before the first run
 
-1. **Create the marker field in Qomon**: a custom field labelled `Presence source`, **single choice**, with one option labelled "Household match" whose value is `household_match`. The job refuses to run without it. (Qomon's Presence values cannot be extended, so the job writes `absent` and marks it with this field.)
+1. **Create the marker field in Qomon**: a custom field labelled `Presence source`, **single choice**, with two options: "Household match" (`household_match`) and "Canvassed after household match" (`recanvassed`). The job refuses to run without it. (Qomon's Presence values cannot be extended, so the job writes `absent` and marks it with this field.)
 2. **Add the space.** The API key comes from stdin, so it is not in shell history:
 
    ```bash
@@ -29,7 +29,7 @@ Locally, `pnpm build` then `pnpm job <command>` with a `.env` (see `.env.example
    unset QOMON_KEY
    ```
 
-   The canvassed values are the form's **stored** values, which can differ from its labels. The household value (`absent`) and the marker (`Presence source` = `household_match`) are the defaults; `--household-value`, `--marker-field`, and `--marker-value` change them. A new space starts with writes off. Run `space:add` again (without stdin) to change settings; the key is kept.
+   The canvassed values are the form's **stored** values, which can differ from its labels. The household value (`absent`) and the marker (`Presence source` = `household_match`, re-marked `recanvassed`) are the defaults; `--household-value`, `--marker-field`, `--marker-value`, and `--recanvassed-value` change them. A new space starts with writes off. Run `space:add` again (without stdin) to change settings; the key is kept.
 3. **Check the config against Qomon:** `job space:check --key <space-key>` lists the form's values and confirms every configured value is on it.
 
 ## Backfill

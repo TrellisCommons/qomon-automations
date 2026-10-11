@@ -18,7 +18,10 @@ import { resolveWriteMode } from '../../qomon/write-mode.js';
 import { getSpace, setWritesEnabled } from '../../spaces/spaces.js';
 import { householdKeyOf, planHouseholdMatch, type PlanStats } from './plan.js';
 import {
+  classifyPresence,
   isMarked,
+  isRemarked,
+  needsRemark,
   presenceOf,
   resolvePresenceConfig,
   type OwnWrites,
@@ -28,6 +31,8 @@ import {
 export const JOB = 'household-match';
 const ACTOR = 'household-match';
 const BATCH_SIZE = 20;
+/** PlannedWrite.field of a marker change; household values are 'presence' */
+const REMARK_FIELD = 'presence_source';
 const VERIFY_POLL_MS = 3_000;
 
 export interface RunOptions {
@@ -187,17 +192,16 @@ async function execute(
 
   const contacts = await collectContacts(qomon, { $all: [] });
   if (deps.signal?.aborted) return interrupt(deps, run, log);
+  const ownWrites = await loadOwnWrites(deps.prisma, space.key);
   const plan = planHouseholdMatch(
     contacts,
     presence,
     space.municipality,
-    await loadOwnWrites(deps.prisma, space.key),
+    ownWrites,
   );
   const limit = opts.maxWrites ?? deps.env.MAX_WRITES_PER_RUN;
-  Object.assign(stats, plan.stats, {
-    limit,
-    overLimit: plan.writes.length > limit,
-  });
+  const total = plan.writes.length + plan.remarks.length;
+  Object.assign(stats, plan.stats, { limit, overLimit: total > limit });
   log.info({ ...plan.stats, limit }, 'planned');
 
   if (plan.writes.length > 0) {
@@ -213,21 +217,34 @@ async function execute(
       })),
     });
   }
+  if (plan.remarks.length > 0) {
+    await deps.prisma.plannedWrite.createMany({
+      data: plan.remarks.map((r) => ({
+        runId: run.id,
+        contactId: r.contactId,
+        field: REMARK_FIELD,
+        valueBefore: presence.marker.value.value,
+        valueAfter: presence.marker.recanvassed.value,
+        triggerContactId: r.contactId,
+        reason: `Presence recorded as ${r.presenceValue} after the household match`,
+      })),
+    });
+  }
 
-  if (!applying || plan.writes.length === 0) return 'SUCCEEDED';
+  if (!applying || total === 0) return 'SUCCEEDED';
   if (deps.signal?.aborted) return interrupt(deps, run, log);
 
-  if (plan.writes.length > limit) {
+  if (total > limit) {
     if (opts.backfill) {
       log.warn(
-        { planned: plan.writes.length, limit },
+        { planned: total, limit },
         'plan exceeds --max-writes; nothing written',
       );
     } else {
       await trip(
         deps,
         space,
-        `run ${run.id} planned ${plan.writes.length} writes, over the limit of ${limit}`,
+        `run ${run.id} planned ${total} writes, over the limit of ${limit}`,
         log,
       );
     }
@@ -235,7 +252,17 @@ async function execute(
   }
 
   const keys = new Map(contacts.map((c) => [c.id, householdKeyOf(c)]));
-  return applyAndVerify(deps, qomon, space, run, presence, keys, stats, log);
+  return applyAndVerify(
+    deps,
+    qomon,
+    space,
+    run,
+    presence,
+    keys,
+    ownWrites,
+    stats,
+    log,
+  );
 }
 
 async function applyAndVerify(
@@ -245,6 +272,7 @@ async function applyAndVerify(
   run: JobRun,
   presence: PresenceConfig,
   keys: Map<number | undefined, string | null>,
+  ownWrites: OwnWrites,
   stats: Partial<RunStats>,
   log: Logger,
 ): Promise<RunStatus> {
@@ -290,13 +318,22 @@ async function applyAndVerify(
         counts.skipped += 1;
         continue;
       }
-      if (presenceOf(current, presence.form)) {
-        await mark(write.id, 'SKIPPED', 'has a Presence since the fetch');
-        counts.skipped += 1;
-        continue;
-      }
-      if (householdKeyOf(current) !== keys.get(write.contactId)) {
-        await mark(write.id, 'SKIPPED', 'address changed since the fetch');
+      const remark = write.field === REMARK_FIELD;
+      const skip = remark
+        ? needsRemark(
+            current,
+            classifyPresence(current, presence, ownWrites).kind,
+            presence,
+          )
+          ? null
+          : 'no longer needs re-marking'
+        : presenceOf(current, presence.form)
+          ? 'has a Presence since the fetch'
+          : householdKeyOf(current) !== keys.get(write.contactId)
+            ? 'address changed since the fetch'
+            : null;
+      if (skip) {
+        await mark(write.id, 'SKIPPED', skip);
         counts.skipped += 1;
         continue;
       }
@@ -312,27 +349,51 @@ async function applyAndVerify(
           await ctx.log({
             subjectType: 'QomonContact',
             subjectId: String(write.contactId),
-            before: { presence: null },
-            after: {
-              presence: write.valueAfter,
-              triggerContactId: write.triggerContactId,
-            },
+            ...(remark
+              ? {
+                  before: { presenceSource: write.valueBefore },
+                  after: { presenceSource: write.valueAfter },
+                }
+              : {
+                  before: { presence: null },
+                  after: {
+                    presence: write.valueAfter,
+                    triggerContactId: write.triggerContactId,
+                  },
+                }),
           });
         },
       );
       attempted += 1;
       try {
-        await qomon.upsertContact({
-          id: write.contactId,
-          name_presences: [
-            { id: presence.form.id, value: presence.household.value },
-          ],
-          // Qomon applies a record whole or drops it whole (test space,
-          // 2026-10-11): the value never lands without its marker
-          custom_fields: [
-            { id: presence.marker.form.id, value: presence.marker.value.value },
-          ],
-        });
+        // a re-mark touches only the custom field; Presence is left as the
+        // person recorded it
+        await qomon.upsertContact(
+          remark
+            ? {
+                id: write.contactId,
+                custom_fields: [
+                  {
+                    id: presence.marker.form.id,
+                    value: presence.marker.recanvassed.value,
+                  },
+                ],
+              }
+            : {
+                id: write.contactId,
+                name_presences: [
+                  { id: presence.form.id, value: presence.household.value },
+                ],
+                // Qomon applies a record whole or drops it whole (test space,
+                // 2026-10-11): the value never lands without its marker
+                custom_fields: [
+                  {
+                    id: presence.marker.form.id,
+                    value: presence.marker.value.value,
+                  },
+                ],
+              },
+        );
         await mark(write.id, 'APPLIED');
         counts.applied += 1;
         sent.push(write);
@@ -352,7 +413,7 @@ async function applyAndVerify(
     const deadline = now().getTime() + deps.env.VERIFY_TIMEOUT_SECONDS * 1000;
     while (pending.size > 0) {
       for (const write of [...pending.values()]) {
-        const seen = await readBack(qomon, write.contactId, presence);
+        const seen = await readBack(qomon, write, presence);
         if (seen.state === 'pending') continue;
         pending.delete(write.id);
         if (seen.state === 'verified') {
@@ -553,7 +614,7 @@ async function reconcileAbandoned(
       where: { runId: old.id, status: { in: ['APPLYING', 'APPLIED'] } },
     });
     for (const write of unsettled) {
-      const seen = await readBack(qomon, write.contactId, presence);
+      const seen = await readBack(qomon, write, presence);
       await deps.prisma.plannedWrite.update({
         where: { id: write.id },
         data:
@@ -638,7 +699,7 @@ async function loadOwnWrites(
   spaceKey: string,
 ): Promise<OwnWrites> {
   const rows = await prisma.plannedWrite.findMany({
-    where: { status: 'VERIFIED', run: { spaceKey } },
+    where: { status: 'VERIFIED', field: 'presence', run: { spaceKey } },
     select: { contactId: true, writtenPresenceDate: true },
     orderBy: { updatedAt: 'asc' },
   });
@@ -647,11 +708,14 @@ async function loadOwnWrites(
 
 type ReadBack =
   | { state: 'verified'; date: string | null }
-  | { state: 'pending' | 'different' | 'unmarked' | 'deleted' };
+  | {
+      state: 'pending' | 'different' | 'unmarked' | 'markerChanged' | 'deleted';
+    };
 
 const READ_BACK_FAILURES = {
   different: 'a different Presence was recorded',
   unmarked: 'the household value is there without its marker',
+  markerChanged: 'the marker was changed or removed by someone else',
   deleted: 'contact deleted before it could be verified',
 } as const;
 
@@ -659,15 +723,21 @@ const READ_BACK_FAILURES = {
  *  marker; `pending` means no Presence yet. */
 async function readBack(
   qomon: QomonApi,
-  contactId: number,
+  write: { contactId: number; field: string },
   presence: PresenceConfig,
 ): Promise<ReadBack> {
   let contact;
   try {
-    contact = await qomon.getContact(contactId);
+    contact = await qomon.getContact(write.contactId);
   } catch (err) {
     if (err instanceof QomonNotFoundError) return { state: 'deleted' };
     throw err;
+  }
+  if (write.field === REMARK_FIELD) {
+    if (isRemarked(contact, presence)) return { state: 'verified', date: null };
+    return isMarked(contact, presence)
+      ? { state: 'pending' }
+      : { state: 'markerChanged' };
   }
   const seen = presenceOf(contact, presence.form);
   if (!seen) return { state: 'pending' };

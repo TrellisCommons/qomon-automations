@@ -36,6 +36,9 @@ model Space {
   /// household value so people (and the job) can tell it from a real knock
   markerField          String    @default("Presence source")
   markerValue          String    @default("household_match")
+  /// the marker's value once a person records Presence again on a contact
+  /// the job wrote (a custom field cannot be cleared through the API)
+  recanvassedValue     String    @default("recanvassed")
   createdAt            DateTime  @default(now())
   updatedAt            DateTime  @updatedAt
 

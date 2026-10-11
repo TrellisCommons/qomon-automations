@@ -28,6 +28,7 @@ As of 2026-10-11 (University—Rosedale test space; the contract suite's marker 
 - Search returns `custom_fields` inline, a few seconds behind the write. `custom_fields ext` is a valid search condition.
 - An unknown value for a custom field drops the whole record, Presence included.
 - Writing Presence again leaves a custom field as it was.
+- An upsert cannot clear a custom field: `value: ""` and `value: null` get 400 "advanced field entries require value", and `custom_fields: []` or `null` is accepted and changes nothing. Writing another value replaces it.
 
 ## Upsert
 

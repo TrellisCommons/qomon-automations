@@ -18,7 +18,10 @@ const MARKER: QomonForm = {
   id: 2,
   label: 'Presence source',
   type: 'radio',
-  refvalues: [{ id: 21, value: 'household_match', label: 'Household match' }],
+  refvalues: [
+    { id: 21, value: 'household_match', label: 'Household match' },
+    { id: 22, value: 'recanvassed', label: 'Canvassed after household match' },
+  ],
 };
 const CANVASSED = ['present', 'absent', 'refus', 'repasse'];
 const SETTINGS = {
@@ -26,6 +29,7 @@ const SETTINGS = {
   householdValue: 'absent',
   markerField: 'Presence source',
   markerValue: 'household_match',
+  recanvassedValue: 'recanvassed',
 };
 const config = resolvePresenceConfig([FORM], [MARKER], SETTINGS);
 
@@ -169,6 +173,47 @@ describe('planHouseholdMatch', () => {
         (w) => w.contactId,
       ),
     ).toEqual([other.id]);
+  });
+
+  it('plans a re-mark for a marked contact a person has since recorded', () => {
+    const own = new Map<number, string>();
+    const visited = contact(
+      { housenumber: '9', street: 'Demo Ln' },
+      { value: 'present', marked: true },
+    );
+    const reknocked = written(
+      { housenumber: '11', street: 'Demo Ln' },
+      '2026-10-05T18:00:00Z',
+    );
+    const ours = written({ housenumber: '13', street: 'Demo Ln' });
+    own
+      .set(reknocked.id!, '2026-10-02T09:00:00Z')
+      .set(ours.id!, '2026-10-02T09:00:00Z');
+    const plan = planHouseholdMatch(
+      [visited, reknocked, ours],
+      config,
+      null,
+      own,
+    );
+    expect(plan.remarks).toEqual([
+      { contactId: visited.id, presenceValue: 'present' },
+      { contactId: reknocked.id, presenceValue: 'absent' },
+    ]);
+    expect(plan.stats.remarks).toBe(2);
+  });
+
+  it('a re-marked contact is a knock and needs no further re-mark', () => {
+    const remarked = contact(
+      { housenumber: '9', street: 'Demo Ln' },
+      { value: 'absent' },
+    );
+    remarked.custom_fields = [
+      { form_id: MARKER.id, form_ref_id: 22, data: 'recanvassed' },
+    ];
+    const other = contact({ housenumber: '9', street: 'Demo Ln' });
+    const plan = planHouseholdMatch([remarked, other], config, null);
+    expect(plan.remarks).toEqual([]);
+    expect(plan.writes.map((w) => w.triggerContactId)).toEqual([remarked.id]);
   });
 
   it('compares recorded dates as instants', () => {
@@ -348,6 +393,12 @@ describe('resolvePresenceConfig', () => {
         markerValue: 'other',
       }),
     ).toThrow(/has no value "other"/);
+    expect(() =>
+      resolvePresenceConfig([FORM], [MARKER], {
+        ...SETTINGS,
+        recanvassedValue: 'gone',
+      }),
+    ).toThrow(/has no value "gone"/);
   });
 
   it('needs exactly one Presence form', () => {

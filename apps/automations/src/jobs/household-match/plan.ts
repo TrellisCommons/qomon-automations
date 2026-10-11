@@ -2,6 +2,7 @@ import { addressKey } from '@trellis/address-match-core';
 import type { QomonContact } from '@trellis/qomon-client';
 import {
   classifyPresence,
+  needsRemark,
   type OwnWrites,
   type PresenceConfig,
 } from './presence.js';
@@ -31,6 +32,14 @@ export interface PlannedHouseholdWrite {
   triggerDate: string | null;
 }
 
+/** A contact still marked as the job's whose Presence a person has since
+ *  recorded: its marker becomes the recanvassed value. */
+export interface PlannedRemark {
+  contactId: number;
+  /** the Presence a person recorded since the job's write */
+  presenceValue: string;
+}
+
 export interface PlanStats {
   fetched: number;
   outsideMunicipality: number;
@@ -40,11 +49,15 @@ export interface PlanStats {
   canvassedHouseholds: number;
   /** contacts in canvassed households left alone by rule 1 */
   alreadyHavePresence: number;
+  /** household values to write */
   planned: number;
+  /** markers to change to the recanvassed value */
+  remarks: number;
 }
 
 export interface Plan {
   writes: PlannedHouseholdWrite[];
+  remarks: PlannedRemark[];
   stats: PlanStats;
 }
 
@@ -104,7 +117,9 @@ export function planHouseholdMatch(
     canvassedHouseholds: 0,
     alreadyHavePresence: 0,
     planned: 0,
+    remarks: 0,
   };
+  const remarks: PlannedRemark[] = [];
 
   const households = new Map<string, QomonContact[]>();
   for (const contact of contacts) {
@@ -112,6 +127,14 @@ export function planHouseholdMatch(
     if (!inMunicipality(contact, municipality)) {
       stats.outsideMunicipality += 1;
       continue;
+    }
+    const { kind, presence: current } = classifyPresence(
+      contact,
+      presence,
+      ownWrites,
+    );
+    if (needsRemark(contact, kind, presence)) {
+      remarks.push({ contactId: contact.id, presenceValue: current!.value });
     }
     const key = householdKeyOf(contact);
     if (key === null) {
@@ -155,6 +178,8 @@ export function planHouseholdMatch(
     }
   }
   writes.sort((a, b) => a.contactId - b.contactId);
+  remarks.sort((a, b) => a.contactId - b.contactId);
   stats.planned = writes.length;
-  return { writes, stats };
+  stats.remarks = remarks.length;
+  return { writes, remarks, stats };
 }

@@ -44,7 +44,10 @@ const MARKER: QomonForm = {
   id: 2,
   label: 'Presence source',
   type: 'radio',
-  refvalues: [{ id: 21, value: 'household_match', label: 'Household match' }],
+  refvalues: [
+    { id: 21, value: 'household_match', label: 'Household match' },
+    { id: 22, value: 'recanvassed', label: 'Canvassed after household match' },
+  ],
 };
 const MARK = [{ form_id: MARKER.id, form_ref_id: 21, data: 'household_match' }];
 
@@ -58,6 +61,18 @@ function householdWrite(c: QomonContact): boolean {
 
 function presenceValue(c: QomonContact): string | undefined {
   return c.formdatas?.find((f) => f.form_id === FORM.id)?.data ?? undefined;
+}
+
+/** The fake with some methods replaced. Every other call goes to the fake
+ *  itself, so its state (including queued upserts) stays in one place. */
+function withOverrides(overrides: Partial<QomonApi>): QomonApi {
+  return new Proxy(qomon, {
+    get(target, prop, receiver) {
+      if (prop in overrides) return overrides[prop as keyof QomonApi];
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
 }
 
 let qomon: InMemoryQomon;
@@ -176,14 +191,11 @@ describe('household match run', () => {
 
   it('fails a write that lands without its marker', async () => {
     await makeSpace(prisma);
-    const api: QomonApi = Object.create(qomon, {
-      upsertContact: {
-        value: ({
-          custom_fields: _dropped,
-          ...rest
-        }: Parameters<QomonApi['upsertContact']>[0]) =>
-          qomon.upsertContact(rest),
-      },
+    const api: QomonApi = withOverrides({
+      upsertContact: ({
+        custom_fields: _dropped,
+        ...rest
+      }: Parameters<QomonApi['upsertContact']>[0]) => qomon.upsertContact(rest),
     });
     const result = await runHouseholdMatch(deps({ api }), hourly);
     expect(result).toMatchObject({
@@ -196,6 +208,39 @@ describe('household match run', () => {
         })
       ).detail,
     ).toBe('the household value is there without its marker');
+  });
+
+  it('re-marks a contact a person visits after the job wrote it, leaving their Presence', async () => {
+    await makeSpace(prisma);
+    await runHouseholdMatch(deps(), hourly);
+    // a canvasser records the housemate as present; the marker stays
+    qomon.seedContact({
+      ...(await qomon.getContact(ids.housemate)),
+      formdatas: presence('present'),
+    });
+
+    const second = await runHouseholdMatch(deps(), hourly);
+    expect(second).toMatchObject({
+      status: 'SUCCEEDED',
+      stats: { planned: 0, remarks: 1, verified: 1 },
+    });
+    const after = await qomon.getContact(ids.housemate);
+    expect(presenceValue(after)).toBe('present');
+    expect(
+      after.custom_fields?.find((f) => f.form_id === MARKER.id)?.form_ref_id,
+    ).toBe(22);
+    const entry = await prisma.changeLogEntry.findFirstOrThrow({
+      where: {
+        subjectId: String(ids.housemate),
+        before: { equals: { presenceSource: 'household_match' } },
+      },
+    });
+    expect(entry.after).toEqual({ presenceSource: 'recanvassed' });
+
+    // re-marking does not hide the job's other writes from it
+    const third = await runHouseholdMatch(deps(), hourly);
+    expect(third).toMatchObject({ stats: { planned: 0, remarks: 0 } });
+    expect(householdWrite(await qomon.getContact(ids.roommate))).toBe(true);
   });
 
   it('is idempotent: the next run plans nothing and stays quiet', async () => {
@@ -313,14 +358,14 @@ describe('household match run', () => {
   it('skips a contact that got a Presence after the fetch', async () => {
     await makeSpace(prisma);
     // a canvasser records a visit between the search and the write
-    const api: QomonApi = Object.create(qomon, {
-      searchContacts: {
-        value: async (params: Parameters<QomonApi['searchContacts']>[0]) => {
-          const page = await qomon.searchContacts(params);
-          const current = await qomon.getContact(ids.housemate);
-          qomon.seedContact({ ...current, formdatas: presence('repasse') });
-          return page;
-        },
+    const api: QomonApi = withOverrides({
+      searchContacts: async (
+        params: Parameters<QomonApi['searchContacts']>[0],
+      ) => {
+        const page = await qomon.searchContacts(params);
+        const current = await qomon.getContact(ids.housemate);
+        qomon.seedContact({ ...current, formdatas: presence('repasse') });
+        return page;
       },
     });
     const result = await runHouseholdMatch(deps({ api }), hourly);
@@ -342,8 +387,8 @@ describe('household match run', () => {
 
   it('a write that never shows up fails, and too many failures trip the breaker', async () => {
     await makeSpace(prisma);
-    const api: QomonApi = Object.create(qomon, {
-      upsertContact: { value: async () => {} },
+    const api: QomonApi = withOverrides({
+      upsertContact: async () => {},
     });
     const d = deps({ api, env: testEnv({ MIN_WRITES_FOR_FAILED_SHARE: 2 }) });
     const result = await runHouseholdMatch(d, hourly);
@@ -418,12 +463,10 @@ describe('progress and restarts', () => {
   it('stops cleanly on a signal: verifies what was sent, and the next run does the rest', async () => {
     await makeSpace(prisma);
     const stop = new AbortController();
-    const api: QomonApi = Object.create(qomon, {
-      upsertContact: {
-        value: async (c: Parameters<QomonApi['upsertContact']>[0]) => {
-          await qomon.upsertContact(c);
-          stop.abort();
-        },
+    const api: QomonApi = withOverrides({
+      upsertContact: async (c: Parameters<QomonApi['upsertContact']>[0]) => {
+        await qomon.upsertContact(c);
+        stop.abort();
       },
     });
     const first = await runHouseholdMatch(

@@ -53,6 +53,8 @@ export interface SpaceConfig {
   markerField?: string;
   /** default "household_match" */
   markerValue?: string;
+  /** default "recanvassed" */
+  recanvassedValue?: string;
 }
 
 /** Without the API key, `config` is the key, name, and match settings only;

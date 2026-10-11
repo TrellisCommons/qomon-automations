@@ -21,8 +21,9 @@ export interface PresenceConfig {
   canvassed: ReadonlySet<string>;
   /** the Presence value written to the rest of the household */
   household: Choice;
-  /** the custom field, and its value, written with every household value */
-  marker: { form: QomonForm; value: Choice };
+  /** the custom field, and its value, written with every household value;
+   *  `recanvassed` replaces `value` once a person records Presence again */
+  marker: { form: QomonForm; value: Choice; recanvassed: Choice };
 }
 
 export interface PresenceSettings {
@@ -30,6 +31,7 @@ export interface PresenceSettings {
   householdValue: string;
   markerField: string;
   markerValue: string;
+  recanvassedValue: string;
 }
 
 export class PresenceConfigError extends Error {
@@ -104,11 +106,18 @@ export function resolvePresenceConfig(
     );
   }
 
+  const recanvassed = choiceOf(markerForm, settings.recanvassedValue);
+  if (!recanvassed) {
+    throw new PresenceConfigError(
+      `custom field ${JSON.stringify(settings.markerField)} has no value ${JSON.stringify(settings.recanvassedValue)} (it has ${quoted(markerForm.refvalues.map((r) => r.value ?? ''))})`,
+    );
+  }
+
   return {
     form,
     canvassed: new Set(settings.canvassedValues),
     household,
-    marker: { form: markerForm, value: markerValue },
+    marker: { form: markerForm, value: markerValue, recanvassed },
   };
 }
 
@@ -128,17 +137,29 @@ export function presenceOf(
   };
 }
 
+function markerOf(
+  contact: QomonContact,
+  config: PresenceConfig,
+): number | null {
+  return (
+    contact.custom_fields?.find((f) => f.form_id === config.marker.form.id)
+      ?.form_ref_id ?? null
+  );
+}
+
+/** Marked as the job's household value (not since re-marked). */
 export function isMarked(
   contact: QomonContact,
   config: PresenceConfig,
 ): boolean {
-  return (
-    contact.custom_fields?.some(
-      (f) =>
-        f.form_id === config.marker.form.id &&
-        f.form_ref_id === config.marker.value.id,
-    ) ?? false
-  );
+  return markerOf(contact, config) === config.marker.value.id;
+}
+
+export function isRemarked(
+  contact: QomonContact,
+  config: PresenceConfig,
+): boolean {
+  return markerOf(contact, config) === config.marker.recanvassed.id;
 }
 
 /** For each contact the job wrote and verified, the Presence date Qomon gave
@@ -154,6 +175,18 @@ export type PresenceKind =
   | 'canvassed'
   /** any other Presence: left alone, triggers nothing */
   | 'other';
+
+/** A contact still marked as the job's whose Presence is no longer the job's
+ *  write: a person recorded Presence since, so the marker should say so. */
+export function needsRemark(
+  contact: QomonContact,
+  kind: PresenceKind,
+  config: PresenceConfig,
+): boolean {
+  return (
+    isMarked(contact, config) && (kind === 'canvassed' || kind === 'other')
+  );
+}
 
 function sameInstant(a: string, b: string): boolean {
   return a === b || Date.parse(a) === Date.parse(b);
