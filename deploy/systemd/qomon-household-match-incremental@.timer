@@ -1,0 +1,9 @@
+[Unit]
+Description=Every-minute incremental Qomon household match (%i)
+
+[Timer]
+OnCalendar=minutely
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

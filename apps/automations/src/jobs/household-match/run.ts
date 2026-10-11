@@ -1,8 +1,4 @@
-import {
-  QomonNotFoundError,
-  collectContacts,
-  type QomonApi,
-} from '@trellis/qomon-client';
+import { QomonNotFoundError, type QomonApi } from '@trellis/qomon-client';
 import { withChangeLog } from '../../changelog/write.js';
 import type { Env } from '../../env.js';
 import type {
@@ -16,6 +12,7 @@ import type { HeldLock } from '../../lock.js';
 import type { Logger } from '../../log.js';
 import { resolveWriteMode } from '../../qomon/write-mode.js';
 import { getSpace, setWritesEnabled } from '../../spaces/spaces.js';
+import { fetchContacts } from './fetch.js';
 import { householdKeyOf, planHouseholdMatch, type PlanStats } from './plan.js';
 import {
   classifyPresence,
@@ -41,6 +38,8 @@ export interface RunOptions {
   apply: boolean;
   /** `--backfill`: a one-off catch-up run; see the runbook */
   backfill: boolean;
+  /** `--incremental`: plan over contacts changed since the space's cursor */
+  incremental?: boolean;
   /** `--max-writes`: overrides MAX_WRITES_PER_RUN; required to apply a backfill */
   maxWrites?: number;
 }
@@ -69,6 +68,12 @@ export interface Progress {
 }
 
 export interface RunStats extends PlanStats {
+  /** what was fetched: the whole space, or changed contacts and their streets */
+  scope: 'full' | 'incremental';
+  changed?: number;
+  streets?: number;
+  /** why an incremental run fetched the whole space */
+  fallback?: string;
   limit: number;
   overLimit: boolean;
   skipped: number;
@@ -113,6 +118,9 @@ export async function runHouseholdMatch(
     return { status: 'inactive' };
   }
   const mode = resolveWriteMode(deps.env, space, opts.apply);
+  if (opts.backfill && opts.incremental) {
+    throw new UsageError('--backfill and --incremental cannot be combined');
+  }
   if (opts.backfill && mode.applying && opts.maxWrites === undefined) {
     throw new UsageError(
       'a backfill that applies needs --max-writes; take it from a dry run first',
@@ -129,7 +137,11 @@ export async function runHouseholdMatch(
     data: {
       job: JOB,
       spaceKey: space.key,
-      kind: opts.backfill ? 'BACKFILL' : 'HOURLY',
+      kind: opts.backfill
+        ? 'BACKFILL'
+        : opts.incremental
+          ? 'INCREMENTAL'
+          : 'HOURLY',
       applying: mode.applying,
     },
   });
@@ -139,6 +151,7 @@ export async function runHouseholdMatch(
       applying: mode.applying,
       blockedBy: mode.blockedBy,
       backfill: opts.backfill,
+      incremental: opts.incremental ?? false,
     },
     'run started',
   );
@@ -190,9 +203,31 @@ async function execute(
       log,
     );
 
-  const contacts = await collectContacts(qomon, { $all: [] });
-  if (deps.signal?.aborted) return interrupt(deps, run, log);
   const ownWrites = await loadOwnWrites(deps.prisma, space.key);
+  const fetched = await fetchContacts(qomon, {
+    incremental: opts.incremental ?? false,
+    cursor: space.changedCursor,
+    presence,
+    ownWrites,
+    municipality: space.municipality,
+    now: deps.now ?? (() => new Date()),
+  });
+  const { contacts } = fetched;
+  stats.scope = fetched.scope;
+  if (fetched.scope === 'incremental')
+    Object.assign(stats, {
+      changed: fetched.changed,
+      streets: fetched.streets,
+    });
+  if (fetched.fallback) stats.fallback = fetched.fallback;
+  if (deps.signal?.aborted) return interrupt(deps, run, log);
+  // Once a run has written everything it planned (or planned nothing),
+  // contacts changed before its search need no second look.
+  const settle = () =>
+    deps.prisma.space.update({
+      where: { key: space.key },
+      data: { changedCursor: fetched.searchedAt },
+    });
   const plan = planHouseholdMatch(
     contacts,
     presence,
@@ -202,7 +237,17 @@ async function execute(
   const limit = opts.maxWrites ?? deps.env.MAX_WRITES_PER_RUN;
   const total = plan.writes.length + plan.remarks.length;
   Object.assign(stats, plan.stats, { limit, overLimit: total > limit });
-  log.info({ ...plan.stats, limit }, 'planned');
+  log.info(
+    {
+      ...plan.stats,
+      limit,
+      scope: fetched.scope,
+      changed: fetched.changed,
+      streets: fetched.streets,
+      fallback: fetched.fallback,
+    },
+    'planned',
+  );
 
   if (plan.writes.length > 0) {
     await deps.prisma.plannedWrite.createMany({
@@ -231,7 +276,11 @@ async function execute(
     });
   }
 
-  if (!applying || total === 0) return 'SUCCEEDED';
+  if (total === 0) {
+    await settle();
+    return 'SUCCEEDED';
+  }
+  if (!applying) return 'SUCCEEDED';
   if (deps.signal?.aborted) return interrupt(deps, run, log);
 
   if (total > limit) {
@@ -252,7 +301,7 @@ async function execute(
   }
 
   const keys = new Map(contacts.map((c) => [c.id, householdKeyOf(c)]));
-  return applyAndVerify(
+  const status = await applyAndVerify(
     deps,
     qomon,
     space,
@@ -263,6 +312,10 @@ async function execute(
     stats,
     log,
   );
+  // a failed write leaves its contact unchanged in Qomon, so only a search
+  // from before this run finds it again
+  if (status === 'SUCCEEDED' && !stats.failed) await settle();
+  return status;
 }
 
 async function applyAndVerify(
@@ -508,7 +561,8 @@ async function finish(
 /** Slack hears about a run only when something went wrong: a write failed,
  *  or the run failed or tripped. Successful runs, and runs stopped on
  *  purpose, send nothing; the health check catches a run that stops
- *  reporting altogether. */
+ *  reporting altogether. A failed run posts only when the run before it did
+ *  not fail, so an outage under a run every minute posts once. */
 async function report(
   deps: RunDeps,
   space: Space,
@@ -523,6 +577,11 @@ async function report(
     result.status === 'FAILED' ||
     result.status === 'TRIPPED';
   if (!failed) return;
+  if (
+    result.status === 'FAILED' &&
+    (await previousRunFailed(deps, space, result.runId))
+  )
+    return;
   const lines = [
     `:rotating_light: ${JOB}${opts.backfill ? ' (backfill)' : ''} on space \`${space.key}\`: ${result.status}`,
     `planned ${s.planned ?? 0} · applied ${s.applied ?? 0} · verified ${s.verified ?? 0} · failed ${s.failed ?? 0} · skipped ${s.skipped ?? 0} · unkeyable ${s.unkeyable ?? 0}`,
@@ -532,6 +591,9 @@ async function report(
         ]
       : []),
     ...(result.error ? [`error: ${result.error}`] : []),
+    ...(result.status === 'FAILED'
+      ? ['Failed runs after this one are not posted until a run gets through.']
+      : []),
     `run \`${result.runId}\``,
   ];
   try {
@@ -647,6 +709,19 @@ async function reconcileAbandoned(
     );
   }
   return reconciled;
+}
+
+async function previousRunFailed(
+  deps: RunDeps,
+  space: Space,
+  runId: string,
+): Promise<boolean> {
+  const previous = await deps.prisma.jobRun.findFirst({
+    where: { job: JOB, spaceKey: space.key, id: { not: runId } },
+    orderBy: { startedAt: 'desc' },
+    select: { status: true },
+  });
+  return previous?.status === 'FAILED';
 }
 
 function statsJson(stats: Partial<RunStats>): Prisma.InputJsonValue {

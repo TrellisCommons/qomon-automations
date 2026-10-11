@@ -1,5 +1,5 @@
 ---
-last-reviewed: 2026-10-09
+last-reviewed: 2026-10-11
 review-interval-days: 30
 ---
 
@@ -45,6 +45,8 @@ As of 2026-10-11 (University—Rosedale test space; the contract suite's marker 
 - `eql` is a case-insensitive token or prefix match, not equality (`address.city eql "Test"` matches "Testville").
 - `form ext` ignores `form_ref_ids`.
 - About 1 second per 1,000-contact page.
+- `UpdatedAt` (PascalCase) filters with `gte` or `range` and an ISO timestamp (a campaign space, read-only, 2026-10-11). A Presence upsert moves it, and a canvasser's Presence leaves it no earlier than the Presence date; it is Qomon's clock, when the change was received.
+- `address.street start_with` matches a prefix of the street as stored ("Example" finds "Example St" and "Example Street"), and several of them can be OR'd under one `$at_least_one` node (same space and date). Whether it ignores case is not known, so callers try the stored case, lower case, and capitalized.
 
 ## Rate limits
 

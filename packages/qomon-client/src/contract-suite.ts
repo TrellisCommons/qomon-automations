@@ -254,6 +254,84 @@ export function runQomonContractSuite(
       expect(answer.form_ref_id).toBe(ref.id);
     });
 
+    it('a Presence write moves UpdatedAt, and search filters on it', async () => {
+      const h = await setup();
+      const [form] = await h.api.listFormsByType('presence_status');
+      const surname = disposableName('Changed');
+      const id = await h.makeContact({ surname });
+      // Qomon's clock, not this host's
+      const since = new Date(
+        Date.parse((await h.api.getContact(id)).UpdatedAt!) + 1,
+      ).toISOString();
+      await h.api.upsertContact({
+        id,
+        name_presences: [{ id: form!.id, value: form!.refvalues[0]!.value! }],
+      });
+      const query = {
+        $all: [
+          {
+            $all: [
+              {
+                $condition: { attr: 'UpdatedAt', ope: 'gte', value: since },
+              },
+            ],
+          },
+          {
+            $all: [
+              { $condition: { attr: 'surname', ope: 'eql', value: surname } },
+            ],
+          },
+        ],
+      };
+      const found = await h.eventually(async () => {
+        const contacts = await collectContacts(h.api, query);
+        return contacts.some((c) => c.id === id) ? contacts : undefined;
+      });
+      expect(found.map((c) => c.id)).toContain(id);
+    });
+
+    it('start_with on the street finds each spelling that begins with it', async () => {
+      const h = await setup();
+      const stem = disposableName('Street');
+      const ids = new Set([
+        await h.makeContact({
+          address: { housenumber: '1', street: `${stem} St` },
+        }),
+        await h.makeContact({
+          address: { housenumber: '1', street: `${stem} Street` },
+        }),
+        await h.makeContact({ address: { street: `1 ${stem} St` } }),
+      ]);
+      const query = {
+        $all: [
+          {
+            $at_least_one: [
+              {
+                $condition: {
+                  attr: 'address.street',
+                  ope: 'start_with',
+                  value: stem,
+                },
+              },
+              {
+                $condition: {
+                  attr: 'address.street',
+                  ope: 'start_with',
+                  value: `1 ${stem}`,
+                },
+              },
+            ],
+          },
+        ],
+      };
+      const found = await h.eventually(async () => {
+        const contacts = await collectContacts(h.api, query);
+        const mine = contacts.filter((c) => ids.has(c.id!));
+        return mine.length === ids.size ? mine : undefined;
+      });
+      expect(new Set(found.map((c) => c.id))).toEqual(ids);
+    });
+
     it('a second Presence replaces the first, dated at write time', async () => {
       const h = await setup();
       const [form] = await h.api.listFormsByType('presence_status');

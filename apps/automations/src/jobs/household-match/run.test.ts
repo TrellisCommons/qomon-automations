@@ -444,6 +444,164 @@ describe('household match run', () => {
   });
 });
 
+describe('incremental runs', () => {
+  const CURSOR = new Date('2026-10-10T11:00:00Z');
+  const OLD = '2026-10-01T00:00:00Z';
+  const incremental: RunOptions = { ...hourly, incremental: true };
+  let inc: {
+    oldHousemate: number;
+    knock: number;
+    numberInStreet: number;
+    neighbour: number;
+  };
+
+  // Example St was knocked long ago; Sample Rd was knocked after the cursor.
+  beforeEach(() => {
+    qomon = new InMemoryQomon({
+      forms: { presence_status: [FORM], custom_fields: [MARKER] },
+    });
+    const old = (firstname: string, address: Record<string, string>) =>
+      qomon.seedContact({ firstname, address, UpdatedAt: OLD }).id!;
+    qomon.seedContact({
+      firstname: 'Ada',
+      address: { housenumber: '345', street: 'Example St' },
+      formdatas: presence('present'),
+      UpdatedAt: OLD,
+    });
+    inc = {
+      oldHousemate: old('Bo', { housenumber: '345', street: 'Example St' }),
+      knock: qomon.seedContact({
+        firstname: 'Cy',
+        address: { housenumber: '12', street: 'Sample Rd' },
+        formdatas: presence('refus'),
+        UpdatedAt: '2026-10-10T11:30:00Z',
+      }).id!,
+      // the number in the street field, and the street spelled out
+      numberInStreet: old('Di', { street: '12 Sample Road' }),
+      neighbour: old('Ed', { housenumber: '14', street: 'Sample Rd' }),
+    };
+    old('Fa', { housenumber: '7', street: 'Other Ave' });
+  });
+
+  it('with no cursor yet fetches everything, then sets the cursor', async () => {
+    await makeSpace(prisma);
+    const result = await runHouseholdMatch(deps(), incremental);
+    expect(result).toMatchObject({
+      status: 'SUCCEEDED',
+      stats: {
+        scope: 'full',
+        fallback: 'no cursor yet',
+        fetched: 6,
+        planned: 2,
+      },
+    });
+    const space = await prisma.space.findUniqueOrThrow({
+      where: { key: 'test-space' },
+    });
+    expect(space.changedCursor?.toISOString()).toBe('2026-10-10T12:00:00.000Z');
+    expect((await prisma.jobRun.findFirstOrThrow()).kind).toBe('INCREMENTAL');
+  });
+
+  it('fetches only changed contacts and their streets', async () => {
+    await makeSpace(prisma, { changedCursor: CURSOR });
+    const result = await runHouseholdMatch(deps(), incremental);
+    expect(result).toMatchObject({
+      status: 'SUCCEEDED',
+      stats: {
+        scope: 'incremental',
+        changed: 1,
+        streets: 1,
+        fetched: 3,
+        planned: 1,
+        verified: 1,
+      },
+    });
+    expect(householdWrite(await qomon.getContact(inc.numberInStreet))).toBe(
+      true,
+    );
+    expect(
+      presenceValue(await qomon.getContact(inc.neighbour)),
+    ).toBeUndefined();
+    // knocked before the cursor: a full run's job, not this one's
+    expect(
+      presenceValue(await qomon.getContact(inc.oldHousemate)),
+    ).toBeUndefined();
+  });
+
+  it("does not search the streets of the job's own writes", async () => {
+    await makeSpace(prisma, { changedCursor: CURSOR });
+    await runHouseholdMatch(deps(), incremental);
+    const next = await runHouseholdMatch(
+      deps({ now: () => new Date('2026-10-10T12:01:00Z') }),
+      incremental,
+    );
+    expect(next).toMatchObject({
+      status: 'SUCCEEDED',
+      stats: { scope: 'incremental', changed: 1, streets: 0, planned: 0 },
+    });
+  });
+
+  it('keeps the cursor while planned writes are unwritten, and moves it once nothing is left', async () => {
+    await makeSpace(prisma, { changedCursor: CURSOR });
+    const cursor = async () =>
+      (await prisma.space.findUniqueOrThrow({ where: { key: 'test-space' } }))
+        .changedCursor;
+
+    await runHouseholdMatch(deps(), { ...incremental, apply: false });
+    expect(await cursor()).toEqual(CURSOR);
+
+    await runHouseholdMatch(deps(), incremental);
+    expect(await cursor()).toEqual(new Date('2026-10-10T12:00:00Z'));
+  });
+
+  it('falls back to a full fetch when too many contacts changed', async () => {
+    await makeSpace(prisma, { changedCursor: CURSOR });
+    const changed = Array.from({ length: 2001 }, (_, i) => ({
+      id: 900_000 + i,
+    }));
+    const many = withOverrides({
+      searchContacts: async (params) => {
+        if (!JSON.stringify(params.query).includes('UpdatedAt'))
+          return qomon.searchContacts(params);
+        const page = params.page ?? 0;
+        const perPage = params.perPage ?? 1000;
+        return changed.slice(page * perPage, (page + 1) * perPage);
+      },
+    });
+    const result = await runHouseholdMatch(deps({ api: many }), {
+      ...incremental,
+      apply: false,
+    });
+    expect(result).toMatchObject({
+      stats: { scope: 'full', fallback: '2001 contacts changed, over 2000' },
+    });
+  });
+
+  it('refuses --incremental with --backfill', async () => {
+    await makeSpace(prisma);
+    await expect(
+      runHouseholdMatch(deps(), { ...incremental, backfill: true }),
+    ).rejects.toThrow(UsageError);
+  });
+
+  it('posts the first of a run of failures, not every one', async () => {
+    await makeSpace(prisma, { changedCursor: CURSOR });
+    const down = withOverrides({
+      searchContacts: async () => {
+        throw new Error('Qomon is down');
+      },
+    });
+    const d = deps({ api: down });
+    await runHouseholdMatch(d, incremental);
+    await runHouseholdMatch(d, incremental);
+    expect(d.notify).toHaveBeenCalledTimes(1);
+
+    await runHouseholdMatch(deps(), incremental);
+    await runHouseholdMatch(d, incremental);
+    expect(d.notify).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe('progress and restarts', () => {
   it('saves progress on the run, and status shows it', async () => {
     await makeSpace(prisma);

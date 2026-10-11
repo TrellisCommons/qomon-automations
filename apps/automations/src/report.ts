@@ -54,6 +54,11 @@ export async function writeRunReport(
 }
 
 interface StoredStats {
+  scope?: 'full' | 'incremental';
+  fetched?: number;
+  changed?: number;
+  streets?: number;
+  fallback?: string;
   planned?: number;
   applied?: number;
   verified?: number;
@@ -87,6 +92,11 @@ export async function runStatus(
       const p = s.progress;
       const lines = [
         `${run.id}  ${run.kind.toLowerCase()}  ${run.status}  ${run.applying ? 'applying' : 'dry run'}  started ${run.startedAt.toISOString()}${run.finishedAt ? `  finished ${run.finishedAt.toISOString()}` : ''}`,
+        ...(s.scope
+          ? [
+              `  fetched ${s.fetched ?? '?'} (${s.scope === 'incremental' ? `${s.changed} changed, ${s.streets} streets` : 'full'}${s.fallback ? `: ${s.fallback}` : ''})`,
+            ]
+          : []),
         `  planned ${s.planned ?? '?'}  applied ${s.applied ?? 0}  verified ${s.verified ?? 0}  failed ${s.failed ?? 0}  skipped ${s.skipped ?? 0}`,
       ];
       if (p) {
@@ -103,4 +113,47 @@ export async function runStatus(
       return lines.join('\n');
     })
     .join('\n');
+}
+
+/**
+ * For moving a space to incremental runs: of the household values that full
+ * runs wrote since `since`, how many an incremental run (a dry run, while
+ * both run) had planned too. An incremental run plans over whole households
+ * from a subset of the space, so it can miss a write but never add one.
+ */
+export async function shadowReport(
+  prisma: PrismaClient,
+  spaceKey: string,
+  since: Date,
+): Promise<string> {
+  const inWindow = { spaceKey, startedAt: { gte: since } };
+  const written = await prisma.plannedWrite.findMany({
+    where: {
+      status: 'VERIFIED',
+      field: 'presence',
+      run: { ...inWindow, kind: { not: 'INCREMENTAL' } },
+    },
+    select: { contactId: true },
+  });
+  const planned = new Set(
+    (
+      await prisma.plannedWrite.findMany({
+        where: { field: 'presence', run: { ...inWindow, kind: 'INCREMENTAL' } },
+        select: { contactId: true },
+        distinct: ['contactId'],
+      })
+    ).map((w) => w.contactId),
+  );
+  const missed = written
+    .map((w) => w.contactId)
+    .filter((id) => !planned.has(id))
+    .sort((a, b) => a - b);
+  return [
+    `since ${since.toISOString()}: full runs wrote ${written.length} household values; incremental runs planned ${written.length - missed.length} of them`,
+    ...(missed.length
+      ? [
+          `missed ${missed.length}: ${missed.slice(0, 20).join(', ')}${missed.length > 20 ? ', ...' : ''}`,
+        ]
+      : []),
+  ].join('\n');
 }

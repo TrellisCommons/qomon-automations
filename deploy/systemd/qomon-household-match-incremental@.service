@@ -1,0 +1,17 @@
+# Incremental household match for one space, every minute: the instance name
+# is the space key.
+#   systemctl enable --now qomon-household-match-incremental@<space-key>.timer
+# Runs alongside the full unit (qomon-household-match@), which catches what
+# an incremental run misses; the job's advisory lock keeps the two apart.
+[Unit]
+Description=Qomon household match, incremental (%i)
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/qomon-automations
+EnvironmentFile=/etc/qomon-automations/compose.env
+ExecStart=/usr/bin/docker compose --profile job run --rm job household-match --space %i --incremental --apply
+TimeoutStartSec=50min
+TimeoutStopSec=5min

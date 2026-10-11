@@ -489,7 +489,7 @@ export class InMemoryQomon implements QomonApi {
       ...current,
       ...fields,
       id,
-      UpdatedAt: new Date().toISOString(),
+      UpdatedAt: after(current.UpdatedAt),
       formdatas: [
         ...(current.formdatas ?? []).filter((f) => !formIds.has(f.form_id)),
         ...answers,
@@ -568,6 +568,16 @@ export class InMemoryQomon implements QomonApi {
       .slice(page * perPage, (page + 1) * perPage)
       .map((c) => structuredClone(c));
   }
+}
+
+/** Now, or a millisecond after `previous` if the clock has not moved: a
+ *  change always moves `UpdatedAt`, as in Qomon. */
+function after(previous: string | undefined): string {
+  const now = Date.now();
+  const last = previous ? Date.parse(previous) : Number.NaN;
+  return new Date(
+    now > last || Number.isNaN(last) ? now : last + 1,
+  ).toISOString();
 }
 
 function invalidQuery(detail: string): QomonValidationError {
@@ -671,6 +681,15 @@ function matchesCondition(
           .toLowerCase()
           .startsWith(String(c.value ?? '').toLowerCase())
       );
+    case 'gte':
+    case 'lte': {
+      if (!present) return false;
+      const a = Date.parse(String(actual));
+      const b = Date.parse(String(c.value ?? ''));
+      if (Number.isNaN(a) || Number.isNaN(b))
+        throw invalidQuery(`the fake compares only dates with ${c.ope}`);
+      return c.ope === 'gte' ? a >= b : a <= b;
+    }
     default:
       throw invalidQuery(`the fake does not support operator ${c.ope}`);
   }

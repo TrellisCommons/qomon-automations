@@ -11,7 +11,7 @@ import {
 import { tryAdvisoryLock } from './lock.js';
 import { createLogger } from './log.js';
 import { pingHealthcheck, postSlack } from './notify/slack.js';
-import { runStatus, writeRunReport } from './report.js';
+import { runStatus, shadowReport, writeRunReport } from './report.js';
 import {
   getSpace,
   qomonFor,
@@ -22,13 +22,18 @@ import {
 
 const USAGE = `Usage: pnpm job <command> [options]
 
-  household-match --space <key> [--apply] [--backfill] [--max-writes <n>] [--report <file.csv>]
+  household-match --space <key> [--apply] [--backfill | --incremental] [--max-writes <n>] [--report <file.csv>]
       Fetch the space, plan, and (with --apply, when the environment and the
       space allow writes) write and verify. Without --apply it is a dry run.
       --backfill marks a one-off catch-up run; applying one needs --max-writes.
+      --incremental fetches only contacts changed since the space's last
+      settled run, and their streets; with no cursor yet it fetches everything.
 
   status --space <key> [--run <id>]      Recent runs, with progress and ETA while one is applying
   report --run <id> --out <file.csv>     A run's planned writes (contact ids only)
+  shadow --space <key> --since <ISO date>
+      Of the household values full runs wrote since then, how many incremental
+      runs planned too; lists the contact ids they missed
   space:add --key <key> --name <name> --canvassed <v1,v2,...>
             [--household-value <v>] [--marker-field <label>] [--marker-value <v>]
             [--recanvassed-value <v>]
@@ -93,6 +98,7 @@ async function main(argv: string[]): Promise<number> {
       key: { type: 'string' },
       apply: { type: 'boolean', default: false },
       backfill: { type: 'boolean', default: false },
+      incremental: { type: 'boolean', default: false },
       'max-writes': { type: 'string' },
       report: { type: 'string' },
       run: { type: 'string' },
@@ -105,6 +111,7 @@ async function main(argv: string[]): Promise<number> {
       'recanvassed-value': { type: 'string' },
       municipality: { type: 'string' },
       'active-until': { type: 'string' },
+      since: { type: 'string' },
       'api-base': { type: 'string' },
       on: { type: 'boolean', default: false },
       off: { type: 'boolean', default: false },
@@ -130,6 +137,15 @@ async function main(argv: string[]): Promise<number> {
             required(values.space, '--space'),
             values.run,
           ),
+        );
+        return 0;
+      }
+      case 'shadow': {
+        const since = new Date(required(values.since, '--since'));
+        if (Number.isNaN(since.getTime()))
+          throw new UsageError('--since must be an ISO date');
+        console.log(
+          await shadowReport(prisma, required(values.space, '--space'), since),
         );
         return 0;
       }
@@ -234,6 +250,7 @@ async function householdMatch(
     space?: string;
     apply: boolean;
     backfill: boolean;
+    incremental: boolean;
     'max-writes'?: string;
     report?: string;
   },
@@ -266,6 +283,7 @@ async function householdMatch(
         spaceKey: required(values.space, '--space'),
         apply: values.apply,
         backfill: values.backfill,
+        incremental: values.incremental,
         maxWrites,
       },
     );

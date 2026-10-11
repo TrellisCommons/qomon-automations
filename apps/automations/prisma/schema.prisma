@@ -39,6 +39,9 @@ model Space {
   /// the marker's value once a person records Presence again on a contact
   /// the job wrote (a custom field cannot be cleared through the API)
   recanvassedValue     String    @default("recanvassed")
+  /// where an incremental run starts: when the last run that settled its
+  /// plan sent its contact search; null until a run settles one
+  changedCursor        DateTime?
   createdAt            DateTime  @default(now())
   updatedAt            DateTime  @updatedAt
 
@@ -48,8 +51,11 @@ model Space {
 }
 
 enum RunKind {
+  /// a scheduled run over every contact
   HOURLY
   BACKFILL
+  /// a scheduled run over contacts changed since the space's cursor
+  INCREMENTAL
 }
 
 enum RunStatus {

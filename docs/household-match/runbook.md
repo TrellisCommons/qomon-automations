@@ -1,5 +1,5 @@
 ---
-last-reviewed: 2026-10-09
+last-reviewed: 2026-10-11
 review-interval-days: 30
 ---
 
@@ -92,6 +92,50 @@ Each run posts to Slack only when something went wrong: a write failed, the run 
 | 3 | interrupted by a signal; safe to run again |
 | 64 | bad command line |
 
+## Every minute
+
+An incremental run (`--incremental`) fetches only contacts changed since the space's cursor and their streets, so it can run every minute; [the design doc](design.md) has how. The full run stays, once a night, to catch what incremental runs miss.
+
+1. **Shadow it** for a day: incremental dry runs every minute while the hourly full run keeps writing. The override drops `--apply`:
+
+   ```bash
+   cp deploy/systemd/qomon-household-match-incremental@.{service,timer} /etc/systemd/system/
+   systemctl edit qomon-household-match-incremental@<space-key>.service
+   ```
+
+   ```ini
+   [Service]
+   ExecStart=
+   ExecStart=/usr/bin/docker compose --profile job run --rm job household-match --space %i --incremental
+   ```
+
+   ```bash
+   systemctl enable --now qomon-household-match-incremental@<space-key>.timer
+   ```
+2. **Compare.** Of the household values full runs wrote, how many incremental runs planned too:
+
+   ```bash
+   job shadow --space <space-key> --since <when the shadow started, ISO>
+   ```
+
+   A missed contact id is one an incremental run never planned. Look it up: a street whose spelling starts with a different word is the expected cause.
+3. **Switch.** Remove the override, so incremental runs apply, and move the full run to once a night:
+
+   ```bash
+   systemctl revert qomon-household-match-incremental@<space-key>.service
+   systemctl edit qomon-household-match@<space-key>.timer
+   ```
+
+   ```ini
+   [Timer]
+   OnCalendar=
+   OnCalendar=*-*-* 03:00:00 America/Toronto
+   ```
+
+   Then `systemctl restart qomon-household-match@<space-key>.timer qomon-household-match-incremental@<space-key>.timer`.
+
+`job status` shows each run's `fetched` line: `full`, or how many contacts changed and how many streets were searched, and why a run fell back to a full fetch. A failed run posts to Slack only when the run before it did not fail, so an outage posts once; with a health check, set its period to a minute.
+
 ## When a breaker trips
 
 1. Read the run: `job report --run <run id> --out /root/run.csv` and `journalctl`. `FAILED` rows say why (`not visible after 120s`, `a different Presence was recorded`).
@@ -100,4 +144,4 @@ Each run posts to Slack only when something went wrong: a write failed, the run 
 
 ## After the election
 
-Runs after `activeUntil` exit without fetching anything. Disable the timer the next day: `systemctl disable --now qomon-household-match@<space-key>.timer`.
+Runs after `activeUntil` exit without fetching anything. Disable the timers the next day: `systemctl disable --now qomon-household-match@<space-key>.timer qomon-household-match-incremental@<space-key>.timer`.
