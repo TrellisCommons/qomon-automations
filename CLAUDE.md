@@ -68,3 +68,4 @@ Tests need Postgres at `DATABASE_URL`; the test setup runs `prisma migrate deplo
 - `docs/household-match/design.md`: the job's rules, decisions, guards, and breakers. Read before changing the job.
 - `docs/household-match/runbook.md`: setting up a space, the backfill, the hourly timer, and what to do when a breaker trips.
 - `docs/integrations/qomon-api.md`: dated Qomon API behaviour the client relies on.
+- `docs/space-archive/runbook.md`: archiving a space with `tools/space-archive/`, sealing it, proving it restores offline, and the re-import field map.
