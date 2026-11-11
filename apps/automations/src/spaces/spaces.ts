@@ -55,6 +55,10 @@ export interface SpaceConfig {
   markerValue?: string;
   /** default "recanvassed" */
   recanvassedValue?: string;
+  /** null turns the deceased rule off; undefined leaves it as it is */
+  deceasedField?: string | null;
+  /** default "yes" */
+  deceasedValue?: string;
 }
 
 /** Without the API key, `config` is the key, name, and match settings only;

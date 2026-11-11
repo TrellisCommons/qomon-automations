@@ -1,6 +1,6 @@
-// Household match job: spaces, runs, planned writes, and the change log.
-// Contact ids are Qomon's; no names, addresses, or other contact data are
-// stored here.
+// Contact rules job (household match, deceased): spaces, runs, planned
+// writes, and the change log. Contact ids are Qomon's; no names, addresses,
+// or other contact data are stored here.
 
 generator client {
   provider = "prisma-client-js"
@@ -37,12 +37,17 @@ model Space {
   markerField          String    @default("Presence source")
   markerValue          String    @default("household_match")
   /// the marker's value once a person records Presence again on a contact
-  /// the job wrote (a custom field cannot be cleared through the API)
+  /// the job wrote (an upsert cannot clear a custom field)
   recanvassedValue     String    @default("recanvassed")
+  /// custom field whose `deceasedValue` turns on "Do not contact"; null
+  /// leaves the deceased rule off for the space
+  deceasedField        String?
+  deceasedValue        String    @default("yes")
   createdAt            DateTime  @default(now())
   updatedAt            DateTime  @updatedAt
 
-  runs JobRun[]
+  runs     JobRun[]
+  deceased HandledDeceased[]
 
   @@map("space")
 }
@@ -105,7 +110,8 @@ model PlannedWrite {
   field               String
   valueBefore         String?
   valueAfter          String
-  /// the canvassed contact at the same address that triggered this write
+  /// what triggered this write: the canvassed contact at the same address
+  /// for a household value, the contact itself for the other fields
   triggerContactId    Int
   reason              String
   status              WriteStatus @default(PLANNED)
@@ -120,6 +126,30 @@ model PlannedWrite {
   @@index([runId, status])
   @@index([contactId])
   @@map("planned_write")
+}
+
+enum DeceasedHandling {
+  /// the job turned on "Do not contact"
+  WRITTEN
+  /// "Do not contact" was already on when the job first saw the mark
+  FOUND
+}
+
+/// Deceased contacts the deceased rule has dealt with, so it acts once per
+/// marking: a person who later turns "Do not contact" off wins. The row goes
+/// when a run sees the contact without the mark, so marking it again acts
+/// again.
+model HandledDeceased {
+  spaceKey  String
+  contactId Int
+  handling  DeceasedHandling
+  runId     String
+  at        DateTime         @default(now())
+
+  space Space @relation(fields: [spaceKey], references: [key])
+
+  @@id([spaceKey, contactId])
+  @@map("handled_deceased")
 }
 
 /// Append-only audit trail of every change the automation made, to Qomon or

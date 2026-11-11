@@ -238,6 +238,28 @@ export function runQomonContractSuite(
       expect(after.address?.city).toBe(before.address?.city);
     });
 
+    it('upsert turns "Do not contact" on but not off', async () => {
+      const h = await setup();
+      const id = await h.makeContact({ surname: disposableName('BlackList') });
+      await h.api.upsertContact({ id, black_list: true });
+      await h.eventually(async () => {
+        const c = await h.api.getContact(id);
+        return c.black_list === true ? c : undefined;
+      });
+      // the name change shows when Qomon has applied the record
+      const marker = disposableName('married');
+      await h.api.upsertContact({
+        id,
+        black_list: false,
+        married_name: marker,
+      });
+      const after = await h.eventually(async () => {
+        const c = await h.api.getContact(id);
+        return c.married_name === marker ? c : undefined;
+      });
+      expect(after.black_list).toBe(true);
+    });
+
     it('upsert by id writes a Presence answer', async () => {
       const h = await setup();
       const [form] = await h.api.listFormsByType('presence_status');

@@ -11,7 +11,7 @@
 #   tools  the full workspace: runs `prisma migrate deploy` (the default
 #          command) before each deploy.
 #
-# docs/household-match/runbook.md has the environment and the droplet setup.
+# docs/contact-rules/runbook.md has the environment and the droplet setup.
 # Docker builds are verified in CI or on a laptop, never in a cloud session.
 
 ARG NODE_VERSION=22.13.1
