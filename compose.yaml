@@ -1,8 +1,8 @@
 # The droplet's stack: Postgres, the migration job, and the job image.
-# docs/household-match/runbook.md has the setup. From the repo checkout:
+# docs/contact-rules/runbook.md has the setup. From the repo checkout:
 #
 #   docker compose up -d db && docker compose run --rm migrate
-#   docker compose run --rm job household-match --space <key>          # dry run
+#   docker compose run --rm job contact-rules --space <key>          # dry run
 #
 # `job` is never started by `up`: the systemd timer runs it (deploy/systemd).
 name: qomon-automations

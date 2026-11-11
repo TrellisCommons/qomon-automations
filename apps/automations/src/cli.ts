@@ -2,11 +2,11 @@ import { parseArgs } from 'node:util';
 import { loadEnv, requireSecretKey, type Env } from './env.js';
 import { getPrisma, type PrismaClient } from './db.js';
 import {
-  loadPresenceConfig,
-  runHouseholdMatch,
+  loadRuleConfig,
+  runContactRules,
   UsageError,
   type RunResult,
-} from './jobs/household-match/run.js';
+} from './jobs/contact-rules/run.js';
 
 import { tryAdvisoryLock } from './lock.js';
 import { createLogger } from './log.js';
@@ -22,9 +22,10 @@ import {
 
 const USAGE = `Usage: pnpm job <command> [options]
 
-  household-match --space <key> [--apply] [--backfill] [--max-writes <n>] [--report <file.csv>]
-      Fetch the space, plan, and (with --apply, when the environment and the
-      space allow writes) write and verify. Without --apply it is a dry run.
+  contact-rules --space <key> [--apply] [--backfill] [--max-writes <n>] [--report <file.csv>]
+      Fetch the space, plan every rule (household match, and deceased when the
+      space has it on), and (with --apply, when the environment and the space
+      allow writes) write and verify. Without --apply it is a dry run.
       --backfill marks a one-off catch-up run; applying one needs --max-writes.
 
   status --space <key> [--run <id>]      Recent runs, with progress and ETA while one is applying
@@ -32,11 +33,14 @@ const USAGE = `Usage: pnpm job <command> [options]
   space:add --key <key> --name <name> --canvassed <v1,v2,...>
             [--household-value <v>] [--marker-field <label>] [--marker-value <v>]
             [--recanvassed-value <v>]
+            [--deceased-field <label>] [--deceased-value <v>]
             [--municipality <city>] [--active-until <ISO date>] [--api-base <url>]
       Defaults: household value "absent", marker field "Presence source" with
       "household_match", re-marked "recanvassed" once a person visits.
+      --deceased-field turns the deceased rule on (value "yes" by default);
+      --deceased-field '' turns it off.
       Create or update a space. A new space reads its Qomon API key from stdin.
-  space:check --key <key>                Read-only: check the config against Qomon's Presence form
+  space:check --key <key>                Read-only: check the config against the space's forms
   space:show --key <key>                 Print a space's config (never its API key)
   space:writes --key <key> (--on|--off) --reason <text>
 `;
@@ -103,6 +107,8 @@ async function main(argv: string[]): Promise<number> {
       'marker-field': { type: 'string' },
       'marker-value': { type: 'string' },
       'recanvassed-value': { type: 'string' },
+      'deceased-field': { type: 'string' },
+      'deceased-value': { type: 'string' },
       municipality: { type: 'string' },
       'active-until': { type: 'string' },
       'api-base': { type: 'string' },
@@ -121,8 +127,8 @@ async function main(argv: string[]): Promise<number> {
   const prisma = getPrisma();
   try {
     switch (command) {
-      case 'household-match':
-        return await householdMatch(env, prisma, values);
+      case 'contact-rules':
+        return await contactRules(env, prisma, values);
       case 'status': {
         console.log(
           await runStatus(
@@ -164,6 +170,11 @@ async function main(argv: string[]): Promise<number> {
             markerField: values['marker-field'],
             markerValue: values['marker-value'],
             recanvassedValue: values['recanvassed-value'],
+            deceasedField:
+              values['deceased-field'] === undefined
+                ? undefined
+                : values['deceased-field'] || null,
+            deceasedValue: values['deceased-value'],
           },
           actorName(),
         );
@@ -188,9 +199,14 @@ async function main(argv: string[]): Promise<number> {
           'Presence values:',
           forms.flatMap((f) => f.refvalues.map((r) => r.value)).join(', '),
         );
-        const config = await loadPresenceConfig(qomon, space);
+        const { presence, deceased } = await loadRuleConfig(qomon, space);
         console.log(
-          `space ${space.key}: canvassed values and household value ${JSON.stringify(config.household.value)} are on the Presence form, and custom field ${JSON.stringify(config.marker.form.label)} has ${JSON.stringify(config.marker.value.value)} and ${JSON.stringify(config.marker.recanvassed.value)}`,
+          `space ${space.key}: canvassed values and household value ${JSON.stringify(presence.household.value)} are on the Presence form, and custom field ${JSON.stringify(presence.marker.form.label)} has ${JSON.stringify(presence.marker.value.value)} and ${JSON.stringify(presence.marker.recanvassed.value)}`,
+        );
+        console.log(
+          deceased
+            ? `deceased rule on: custom field ${JSON.stringify(deceased.field.label)} has ${JSON.stringify(deceased.value.value)}`
+            : 'deceased rule off',
         );
         return 0;
       }
@@ -227,7 +243,7 @@ function required(value: string | undefined, flag: string): string {
   return value;
 }
 
-async function householdMatch(
+async function contactRules(
   env: Env,
   prisma: PrismaClient,
   values: {
@@ -252,7 +268,7 @@ async function householdMatch(
   const log = createLogger();
   let result: RunResult | undefined;
   try {
-    result = await runHouseholdMatch(
+    result = await runContactRules(
       {
         prisma,
         env,

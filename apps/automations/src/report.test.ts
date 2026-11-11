@@ -19,7 +19,7 @@ describe('run report', () => {
     const path = join(mkdtempSync(join(tmpdir(), 'report-')), 'report.csv');
     expect(await writeRunReport(prisma, 'no-run', path)).toBe(0);
     expect(readFileSync(path, 'utf8')).toBe(
-      'contact_id,trigger_contact_id,value_after,status,detail\n',
+      'contact_id,field,trigger_contact_id,value_after,status,detail\n',
     );
   });
 });

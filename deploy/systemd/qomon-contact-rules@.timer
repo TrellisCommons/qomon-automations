@@ -1,5 +1,5 @@
 [Unit]
-Description=Hourly Qomon household match (%i)
+Description=Hourly Qomon contact rules (%i)
 
 [Timer]
 OnCalendar=hourly

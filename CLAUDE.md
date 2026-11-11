@@ -1,6 +1,8 @@
 # qomon-automations
 
-Scheduled jobs that read and write a campaign's Qomon space. The first job is the household match: when a canvasser records a Presence on one contact, every other contact at that address gets Presence "absent", marked "Household match" in the "Presence source" custom field. The plan is [issue #1](https://github.com/TrellisCommons/qomon-automations/issues/1).
+Scheduled jobs that read and write a campaign's Qomon space. The contact rules job applies two rules from one fetch:
+- **Household match**: when a canvasser records a Presence on one contact, every other contact at that address gets Presence "absent", marked "Household match" in the "Presence source" custom field. The plan is [issue #1](https://github.com/TrellisCommons/qomon-automations/issues/1).
+- **Deceased**: a contact marked deceased gets Qomon's "Do not contact".
 
 ## This repo is public
 
@@ -65,7 +67,7 @@ Tests need Postgres at `DATABASE_URL`; the test setup runs `prisma migrate deplo
 
 ## Knowledge base
 
-- `docs/household-match/design.md`: the job's rules, decisions, guards, and breakers. Read before changing the job.
-- `docs/household-match/runbook.md`: setting up a space, the backfill, the hourly timer, and what to do when a breaker trips.
+- `docs/contact-rules/design.md`: the job's rules, decisions, guards, and breakers. Read before changing the job.
+- `docs/contact-rules/runbook.md`: setting up a space, the backfill, the hourly timer, and what to do when a breaker trips or Slack asks for a decision.
 - `docs/integrations/qomon-api.md`: dated Qomon API behaviour the client relies on.
 - `docs/space-archive/runbook.md`: archiving a space with `tools/space-archive/`, sealing it, proving it restores offline, and the re-import field map.

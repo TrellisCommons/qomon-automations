@@ -7,7 +7,7 @@ import { tryAdvisoryLock } from '../../lock.js';
 import { runStatus } from '../../report.js';
 import { makeSpace, resetDb, testEnv, testPrisma } from '../../test/db.js';
 import {
-  runHouseholdMatch,
+  runContactRules,
   UsageError,
   type RunDeps,
   type RunOptions,
@@ -50,6 +50,19 @@ const MARKER: QomonForm = {
   ],
 };
 const MARK = [{ form_id: MARKER.id, form_ref_id: 21, data: 'household_match' }];
+
+const DECEASED: QomonForm = {
+  id: 3,
+  label: 'Deceased',
+  type: 'checkbox',
+  refvalues: [
+    { id: 31, value: 'yes', label: 'DECEASED' },
+    { id: 32, value: 'no', label: 'NOT deceased' },
+  ],
+};
+const MARKED_DECEASED = [
+  { form_id: DECEASED.id, form_ref_id: 31, data: 'yes' },
+];
 
 /** the household value and its marker, as the job writes them */
 function householdWrite(c: QomonContact): boolean {
@@ -140,7 +153,7 @@ const hourly: RunOptions = {
 beforeEach(async () => {
   await resetDb(prisma);
   qomon = new InMemoryQomon({
-    forms: { presence_status: [FORM], custom_fields: [MARKER] },
+    forms: { presence_status: [FORM], custom_fields: [MARKER, DECEASED] },
   });
   seed(qomon);
 });
@@ -149,7 +162,7 @@ describe('household match run', () => {
   it('writes, verifies, and change-logs the household value', async () => {
     await makeSpace(prisma);
     const d = deps();
-    const result = await runHouseholdMatch(d, hourly);
+    const result = await runContactRules(d, hourly);
 
     expect(result).toMatchObject({ status: 'SUCCEEDED', applying: true });
     expect(result).toMatchObject({
@@ -171,7 +184,7 @@ describe('household match run', () => {
       [ids.housemate, ids.roommate].sort(),
     );
     expect(entries[0]).toMatchObject({
-      actor: 'household-match',
+      actor: 'contact-rules',
       before: { presence: null },
     });
     // a successful run, writes or not, posts nothing
@@ -180,7 +193,7 @@ describe('household match run', () => {
 
   it('records the Presence date each write got, for telling its writes from later knocks', async () => {
     await makeSpace(prisma);
-    await runHouseholdMatch(deps(), hourly);
+    await runContactRules(deps(), hourly);
     const write = await prisma.plannedWrite.findFirstOrThrow({
       where: { contactId: ids.housemate },
     });
@@ -199,7 +212,7 @@ describe('household match run', () => {
       }: Parameters<QomonApi['upsertContact']>[0]) => qomon.upsertContact(rest),
     });
     const d = deps({ api });
-    const result = await runHouseholdMatch(d, hourly);
+    const result = await runContactRules(d, hourly);
     expect(result).toMatchObject({
       status: 'SUCCEEDED',
       stats: { applied: 2, verified: 0, failed: 2 },
@@ -218,14 +231,14 @@ describe('household match run', () => {
 
   it('re-marks a contact a person visits after the job wrote it, leaving their Presence', async () => {
     await makeSpace(prisma);
-    await runHouseholdMatch(deps(), hourly);
+    await runContactRules(deps(), hourly);
     // a canvasser records the housemate as present; the marker stays
     qomon.seedContact({
       ...(await qomon.getContact(ids.housemate)),
       formdatas: presence('present'),
     });
 
-    const second = await runHouseholdMatch(deps(), hourly);
+    const second = await runContactRules(deps(), hourly);
     expect(second).toMatchObject({
       status: 'SUCCEEDED',
       stats: { planned: 0, remarks: 1, verified: 1 },
@@ -244,16 +257,16 @@ describe('household match run', () => {
     expect(entry.after).toEqual({ presenceSource: 'recanvassed' });
 
     // re-marking does not hide the job's other writes from it
-    const third = await runHouseholdMatch(deps(), hourly);
+    const third = await runContactRules(deps(), hourly);
     expect(third).toMatchObject({ stats: { planned: 0, remarks: 0 } });
     expect(householdWrite(await qomon.getContact(ids.roommate))).toBe(true);
   });
 
   it('is idempotent: the next run plans nothing and stays quiet', async () => {
     await makeSpace(prisma);
-    await runHouseholdMatch(deps(), hourly);
+    await runContactRules(deps(), hourly);
     const d = deps();
-    const second = await runHouseholdMatch(d, hourly);
+    const second = await runContactRules(d, hourly);
     expect(second).toMatchObject({
       status: 'SUCCEEDED',
       stats: { planned: 0 },
@@ -275,7 +288,7 @@ describe('household match run', () => {
     async (_name, depOverrides, spaceData, opts) => {
       await makeSpace(prisma, spaceData);
       const d = deps(depOverrides);
-      const result = await runHouseholdMatch(d, opts);
+      const result = await runContactRules(d, opts);
       expect(result).toMatchObject({
         status: 'SUCCEEDED',
         applying: false,
@@ -294,7 +307,7 @@ describe('household match run', () => {
   it('trips when an hourly run plans more than the limit, and turns the space off', async () => {
     await makeSpace(prisma);
     const d = deps({ env: testEnv({ MAX_WRITES_PER_RUN: 1 }) });
-    const result = await runHouseholdMatch(d, hourly);
+    const result = await runContactRules(d, hourly);
     expect(result).toMatchObject({
       status: 'TRIPPED',
       stats: { planned: 2, overLimit: true },
@@ -314,7 +327,7 @@ describe('household match run', () => {
 
   it('a backfill over --max-writes writes nothing but leaves the space on', async () => {
     await makeSpace(prisma);
-    const result = await runHouseholdMatch(deps(), {
+    const result = await runContactRules(deps(), {
       ...hourly,
       backfill: true,
       maxWrites: 1,
@@ -332,7 +345,7 @@ describe('household match run', () => {
   it('a backfill within --max-writes applies past MAX_WRITES_PER_RUN', async () => {
     await makeSpace(prisma);
     const d = deps({ env: testEnv({ MAX_WRITES_PER_RUN: 1 }) });
-    const result = await runHouseholdMatch(d, {
+    const result = await runContactRules(d, {
       ...hourly,
       backfill: true,
       maxWrites: 2,
@@ -347,9 +360,9 @@ describe('household match run', () => {
   it('refuses to apply a backfill without --max-writes, but dry-runs one', async () => {
     await makeSpace(prisma);
     await expect(
-      runHouseholdMatch(deps(), { ...hourly, backfill: true }),
+      runContactRules(deps(), { ...hourly, backfill: true }),
     ).rejects.toBeInstanceOf(UsageError);
-    const dry = await runHouseholdMatch(deps(), {
+    const dry = await runContactRules(deps(), {
       ...hourly,
       apply: false,
       backfill: true,
@@ -374,7 +387,7 @@ describe('household match run', () => {
         return page;
       },
     });
-    const result = await runHouseholdMatch(deps({ api }), hourly);
+    const result = await runContactRules(deps({ api }), hourly);
     expect(result).toMatchObject({
       status: 'SUCCEEDED',
       stats: { planned: 2, skipped: 1, verified: 1 },
@@ -397,7 +410,7 @@ describe('household match run', () => {
       upsertContact: async () => {},
     });
     const d = deps({ api, env: testEnv({ MIN_WRITES_FOR_FAILED_SHARE: 2 }) });
-    const result = await runHouseholdMatch(d, hourly);
+    const result = await runContactRules(d, hourly);
     expect(result).toMatchObject({
       status: 'TRIPPED',
       stats: { applied: 2, verified: 0, failed: 2 },
@@ -418,7 +431,7 @@ describe('household match run', () => {
   it('fails without planning when the household value is not on the form', async () => {
     await makeSpace(prisma, { householdValue: 'Absent (other)' });
     const d = deps();
-    const result = await runHouseholdMatch(d, hourly);
+    const result = await runContactRules(d, hourly);
     expect(result).toMatchObject({ status: 'FAILED' });
     expect('error' in result && result.error).toMatch(
       /not on the Presence form/,
@@ -429,7 +442,7 @@ describe('household match run', () => {
 
   it('does nothing after activeUntil', async () => {
     await makeSpace(prisma, { activeUntil: new Date('2026-10-01T00:00:00Z') });
-    expect(await runHouseholdMatch(deps(), hourly)).toEqual({
+    expect(await runContactRules(deps(), hourly)).toEqual({
       status: 'inactive',
     });
     expect(await prisma.jobRun.count()).toBe(0);
@@ -438,7 +451,7 @@ describe('household match run', () => {
   it('exits when another run holds the lock', async () => {
     await makeSpace(prisma);
     expect(
-      await runHouseholdMatch(deps({ lock: async () => null }), hourly),
+      await runContactRules(deps({ lock: async () => null }), hourly),
     ).toEqual({ status: 'locked' });
     expect(await prisma.jobRun.count()).toBe(0);
   });
@@ -447,7 +460,7 @@ describe('household match run', () => {
 describe('progress and restarts', () => {
   it('saves progress on the run, and status shows it', async () => {
     await makeSpace(prisma);
-    const result = await runHouseholdMatch(deps(), hourly);
+    const result = await runContactRules(deps(), hourly);
     const run = await prisma.jobRun.findUniqueOrThrow({
       where: { id: 'runId' in result ? result.runId : '' },
     });
@@ -460,7 +473,7 @@ describe('progress and restarts', () => {
   it('a successful backfill posts nothing to Slack', async () => {
     await makeSpace(prisma);
     const d = deps();
-    const result = await runHouseholdMatch(d, {
+    const result = await runContactRules(d, {
       ...hourly,
       backfill: true,
       maxWrites: 10,
@@ -482,7 +495,7 @@ describe('progress and restarts', () => {
       },
     });
     const stopped = deps({ api, signal: stop.signal });
-    const first = await runHouseholdMatch(stopped, hourly);
+    const first = await runContactRules(stopped, hourly);
     // a stop on purpose is not a failure
     expect(stopped.notify).not.toHaveBeenCalled();
     expect(first).toMatchObject({
@@ -498,7 +511,7 @@ describe('progress and restarts', () => {
       detail: 'run interrupted before this write',
     });
 
-    const second = await runHouseholdMatch(deps(), hourly);
+    const second = await runContactRules(deps(), hourly);
     expect(second).toMatchObject({
       status: 'SUCCEEDED',
       stats: { planned: 1, verified: 1 },
@@ -518,7 +531,7 @@ describe('progress and restarts', () => {
     });
     const dead = await prisma.jobRun.create({
       data: {
-        job: 'household-match',
+        job: 'contact-rules',
         spaceKey: space.key,
         kind: 'BACKFILL',
         applying: true,
@@ -544,7 +557,7 @@ describe('progress and restarts', () => {
       ],
     });
 
-    const result = await runHouseholdMatch(deps(), hourly);
+    const result = await runContactRules(deps(), hourly);
     expect(result).toMatchObject({
       status: 'SUCCEEDED',
       stats: { reconciled: 2, planned: 1, verified: 1 },
@@ -572,12 +585,162 @@ describe('progress and restarts', () => {
 describe('advisory lock', () => {
   it('admits one holder at a time', async () => {
     const url = process.env.DATABASE_URL!;
-    const first = await tryAdvisoryLock(url, 'household-match:lock-test');
+    const first = await tryAdvisoryLock(url, 'contact-rules:lock-test');
     expect(first).not.toBeNull();
-    expect(await tryAdvisoryLock(url, 'household-match:lock-test')).toBeNull();
+    expect(await tryAdvisoryLock(url, 'contact-rules:lock-test')).toBeNull();
     await first!.release();
-    const again = await tryAdvisoryLock(url, 'household-match:lock-test');
+    const again = await tryAdvisoryLock(url, 'contact-rules:lock-test');
     expect(again).not.toBeNull();
     await again!.release();
+  });
+});
+
+describe('deceased rule', () => {
+  const withDeceased = { deceasedField: 'Deceased' };
+
+  async function setContact(id: number, changes: Partial<QomonContact>) {
+    qomon.seedContact({ ...(await qomon.getContact(id)), ...changes });
+  }
+
+  it('turns "Do not contact" on, verifies it, and records the contact as handled', async () => {
+    await makeSpace(prisma, withDeceased);
+    await setContact(ids.neighbour, { custom_fields: MARKED_DECEASED });
+
+    const result = await runContactRules(deps(), hourly);
+    expect(result).toMatchObject({
+      status: 'SUCCEEDED',
+      stats: { deceased: 1, deceasedPlanned: 1, failed: 0 },
+    });
+    expect((await qomon.getContact(ids.neighbour)).black_list).toBe(true);
+    expect(
+      await prisma.handledDeceased.findUniqueOrThrow({
+        where: {
+          spaceKey_contactId: {
+            spaceKey: 'test-space',
+            contactId: ids.neighbour,
+          },
+        },
+      }),
+    ).toMatchObject({ handling: 'WRITTEN' });
+    const entry = await prisma.changeLogEntry.findFirstOrThrow({
+      where: { subjectId: String(ids.neighbour) },
+    });
+    expect(entry).toMatchObject({
+      before: { blackList: false },
+      after: { blackList: true },
+    });
+  });
+
+  it('sends one upsert carrying every change to a contact', async () => {
+    await makeSpace(prisma, withDeceased);
+    await setContact(ids.housemate, { custom_fields: MARKED_DECEASED });
+    const upserts: number[] = [];
+    const api = withOverrides({
+      upsertContact: (c: Parameters<QomonApi['upsertContact']>[0]) => {
+        upserts.push(c.id);
+        return qomon.upsertContact(c);
+      },
+    });
+
+    const result = await runContactRules(deps({ api }), hourly);
+    expect(result).toMatchObject({
+      stats: { planned: 2, deceasedPlanned: 1, verified: 3, failed: 0 },
+    });
+    expect(upserts.filter((id) => id === ids.housemate)).toHaveLength(1);
+    const housemate = await qomon.getContact(ids.housemate);
+    expect(householdWrite(housemate)).toBe(true);
+    expect(housemate.black_list).toBe(true);
+  });
+
+  it('acts once per marking: a person turning "Do not contact" off wins', async () => {
+    await makeSpace(prisma, withDeceased);
+    await setContact(ids.neighbour, { custom_fields: MARKED_DECEASED });
+    await runContactRules(deps(), hourly);
+    await setContact(ids.neighbour, { black_list: false });
+
+    const second = await runContactRules(deps(), hourly);
+    expect(second).toMatchObject({ stats: { deceasedPlanned: 0 } });
+    expect((await qomon.getContact(ids.neighbour)).black_list).toBe(false);
+  });
+
+  it('acts again once the mark is removed and set again', async () => {
+    await makeSpace(prisma, withDeceased);
+    await setContact(ids.neighbour, { custom_fields: MARKED_DECEASED });
+    await runContactRules(deps(), hourly);
+    await setContact(ids.neighbour, { black_list: false, custom_fields: [] });
+
+    const unmarked = await runContactRules(deps(), hourly);
+    expect(unmarked).toMatchObject({ stats: { deceasedRearmed: 1 } });
+    expect(await prisma.handledDeceased.count()).toBe(0);
+
+    await setContact(ids.neighbour, { custom_fields: MARKED_DECEASED });
+    const remarked = await runContactRules(deps(), hourly);
+    expect(remarked).toMatchObject({
+      stats: { deceasedPlanned: 1, verified: 1 },
+    });
+    expect((await qomon.getContact(ids.neighbour)).black_list).toBe(true);
+  });
+
+  it('records a contact already "Do not contact" as handled without writing', async () => {
+    await makeSpace(prisma, withDeceased);
+    await setContact(ids.neighbour, {
+      custom_fields: MARKED_DECEASED,
+      black_list: true,
+    });
+
+    const result = await runContactRules(deps(), hourly);
+    expect(result).toMatchObject({
+      stats: { deceased: 1, deceasedPlanned: 0 },
+    });
+    expect(await prisma.handledDeceased.findFirstOrThrow()).toMatchObject({
+      contactId: ids.neighbour,
+      handling: 'FOUND',
+    });
+  });
+
+  it('asks a person to decide when a contact it blacklisted is no longer marked', async () => {
+    await makeSpace(prisma, withDeceased);
+    await setContact(ids.neighbour, { custom_fields: MARKED_DECEASED });
+    await runContactRules(deps(), hourly);
+    await setContact(ids.neighbour, { custom_fields: [] });
+
+    const d = deps();
+    const result = await runContactRules(d, hourly);
+    expect(result).toMatchObject({
+      status: 'SUCCEEDED',
+      review: [ids.neighbour],
+    });
+    expect(d.notify).toHaveBeenCalledOnce();
+    expect(d.notify.mock.calls[0]![0]).toMatch(
+      new RegExp(`no longer marked deceased.*${ids.neighbour}`),
+    );
+    expect((await qomon.getContact(ids.neighbour)).black_list).toBe(true);
+  });
+
+  it('is off for a space without a deceased field', async () => {
+    await makeSpace(prisma);
+    await setContact(ids.neighbour, { custom_fields: MARKED_DECEASED });
+    const result = await runContactRules(deps(), hourly);
+    expect(result.status).toBe('SUCCEEDED');
+    expect((await qomon.getContact(ids.neighbour)).black_list).toBeUndefined();
+  });
+
+  it('fails the run when the deceased field is missing from the space', async () => {
+    await makeSpace(prisma, { deceasedField: 'Passed away' });
+    const result = await runContactRules(deps(), hourly);
+    expect(result).toMatchObject({ status: 'FAILED' });
+    expect('error' in result && result.error).toMatch(
+      /DeceasedConfigError: expected one custom field labelled "Passed away"/,
+    );
+  });
+
+  it('counts "Do not contact" writes toward the write limit', async () => {
+    await makeSpace(prisma, withDeceased);
+    await setContact(ids.neighbour, { custom_fields: MARKED_DECEASED });
+    const result = await runContactRules(
+      deps({ env: testEnv({ MAX_WRITES_PER_RUN: 2 }) }),
+      hourly,
+    );
+    expect(result).toMatchObject({ status: 'TRIPPED' });
   });
 });

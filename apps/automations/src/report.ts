@@ -23,8 +23,9 @@ function gitRootAbove(path: string): string | null {
   }
 }
 
-/** A run's planned writes as CSV: Qomon contact ids, the triggering contact,
- *  and each write's outcome. For checking a dry run against the sheet. */
+/** A run's planned writes as CSV: Qomon contact ids, the field each write
+ *  changes (`presence`, `presence_source`, or `black_list`), the triggering
+ *  contact, and each write's outcome. For checking a dry run. */
 export async function writeRunReport(
   prisma: PrismaClient,
   runId: string,
@@ -38,9 +39,16 @@ export async function writeRunReport(
     orderBy: { contactId: 'asc' },
   });
   const rows = [
-    'contact_id,trigger_contact_id,value_after,status,detail',
+    'contact_id,field,trigger_contact_id,value_after,status,detail',
     ...writes.map((w) =>
-      [w.contactId, w.triggerContactId, w.valueAfter, w.status, w.detail ?? '']
+      [
+        w.contactId,
+        w.field,
+        w.triggerContactId,
+        w.valueAfter,
+        w.status,
+        w.detail ?? '',
+      ]
         .map((v) =>
           /[",\n]/.test(String(v))
             ? `"${String(v).replace(/"/g, '""')}"`
