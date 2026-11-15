@@ -20,7 +20,6 @@ import { resolveWriteMode } from '../../qomon/write-mode.js';
 import { getSpace, setWritesEnabled } from '../../spaces/spaces.js';
 import {
   deceasedStateOf,
-  isBlacklisted,
   planDeceased,
   resolveDeceasedConfig,
   type DeceasedConfig,
@@ -542,7 +541,7 @@ function stillNeeded(
       if (!config.deceased) return 'the deceased rule is off';
       if (deceasedStateOf(current, config.deceased) !== 'deceased')
         return 'no longer marked deceased';
-      return isBlacklisted(current) ? 'already "Do not contact"' : null;
+      return current.black_list === true ? 'already "Do not contact"' : null;
     default:
       if (presenceOf(current, presence.form))
         return 'has a Presence since the fetch';
@@ -968,7 +967,7 @@ function readBack(
         ? { state: 'pending' }
         : { state: 'markerChanged' };
     case BLACKLIST_FIELD:
-      return isBlacklisted(contact)
+      return contact.black_list === true
         ? { state: 'verified', date: null }
         : { state: 'pending' };
     default: {

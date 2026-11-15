@@ -1,4 +1,9 @@
-import type { QomonApi, QomonContact, QomonForm } from '@trellis/qomon-client';
+import {
+  QomonNotFoundError,
+  type QomonApi,
+  type QomonContact,
+  type QomonForm,
+} from '@trellis/qomon-client';
 import { InMemoryQomon } from '@trellis/qomon-client/fake';
 import { pino } from 'pino';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -7,6 +12,7 @@ import { tryAdvisoryLock } from '../../lock.js';
 import { runStatus } from '../../report.js';
 import { makeSpace, resetDb, testEnv, testPrisma } from '../../test/db.js';
 import {
+  mergeUpserts,
   runContactRules,
   UsageError,
   type RunDeps,
@@ -404,6 +410,72 @@ describe('household match run', () => {
     });
   });
 
+  it('skips a contact whose address changed after the fetch', async () => {
+    await makeSpace(prisma);
+    const api: QomonApi = withOverrides({
+      searchContacts: async (
+        params: Parameters<QomonApi['searchContacts']>[0],
+      ) => {
+        const page = await qomon.searchContacts(params);
+        const current = await qomon.getContact(ids.housemate);
+        qomon.seedContact({
+          ...current,
+          address: {
+            housenumber: '351',
+            street: 'Example St',
+            city: 'Exampleton',
+          },
+        });
+        return page;
+      },
+    });
+    const result = await runContactRules(deps({ api }), hourly);
+    expect(result).toMatchObject({
+      status: 'SUCCEEDED',
+      stats: { planned: 2, skipped: 1, verified: 1 },
+    });
+    expect(
+      presenceValue(await qomon.getContact(ids.housemate)),
+    ).toBeUndefined();
+    expect(
+      await prisma.plannedWrite.findFirst({
+        where: { contactId: ids.housemate },
+      }),
+    ).toMatchObject({
+      status: 'SKIPPED',
+      detail: 'address changed since the fetch',
+    });
+  });
+
+  it('fails a write whose contact is deleted before it is read back', async () => {
+    await makeSpace(prisma);
+    let reads = 0;
+    const api: QomonApi = withOverrides({
+      getContact: async (id: number) => {
+        // the first read is the re-read before writing; later ones verify
+        if (id === ids.housemate && ++reads > 1)
+          throw new QomonNotFoundError('contact not found', {
+            method: 'GET',
+            path: `/contacts/${id}`,
+            attempt: 1,
+            httpStatus: 404,
+          });
+        return qomon.getContact(id);
+      },
+    });
+    const d = deps({ api });
+    const result = await runContactRules(d, hourly);
+    expect(result).toMatchObject({ stats: { verified: 1, failed: 1 } });
+    expect(
+      await prisma.plannedWrite.findFirst({
+        where: { contactId: ids.housemate },
+      }),
+    ).toMatchObject({
+      status: 'FAILED',
+      detail: 'contact deleted before it could be verified',
+    });
+  });
+
   it('a write that never shows up fails, and too many failures trip the breaker', async () => {
     await makeSpace(prisma);
     const api: QomonApi = withOverrides({
@@ -742,5 +814,95 @@ describe('deceased rule', () => {
       hourly,
     );
     expect(result).toMatchObject({ status: 'TRIPPED' });
+  });
+
+  it('fails a "Do not contact" write that never shows up, and records nothing as handled', async () => {
+    await makeSpace(prisma, withDeceased);
+    await setContact(ids.neighbour, { custom_fields: MARKED_DECEASED });
+    const api = withOverrides({
+      upsertContact: async (c: Parameters<QomonApi['upsertContact']>[0]) => {
+        if (c.black_list) return;
+        return qomon.upsertContact(c);
+      },
+    });
+    const d = deps({ api });
+    const result = await runContactRules(d, hourly);
+    expect(result).toMatchObject({
+      stats: { deceasedPlanned: 1, verified: 2, failed: 1 },
+    });
+    expect(
+      await prisma.plannedWrite.findFirst({
+        where: { contactId: ids.neighbour },
+      }),
+    ).toMatchObject({ status: 'FAILED', detail: 'not visible after 30s' });
+    expect(await prisma.handledDeceased.count()).toBe(0);
+    expect(d.notify).toHaveBeenCalledOnce();
+  });
+
+  it('skips a contact no longer marked deceased when it is re-read', async () => {
+    await makeSpace(prisma, withDeceased);
+    await setContact(ids.neighbour, { custom_fields: MARKED_DECEASED });
+    const api: QomonApi = withOverrides({
+      searchContacts: async (
+        params: Parameters<QomonApi['searchContacts']>[0],
+      ) => {
+        const page = await qomon.searchContacts(params);
+        await setContact(ids.neighbour, { custom_fields: [] });
+        return page;
+      },
+    });
+    const result = await runContactRules(deps({ api }), hourly);
+    expect(result).toMatchObject({ stats: { deceasedPlanned: 1, skipped: 1 } });
+    expect((await qomon.getContact(ids.neighbour)).black_list).toBeUndefined();
+    expect(
+      await prisma.plannedWrite.findFirst({
+        where: { contactId: ids.neighbour },
+      }),
+    ).toMatchObject({ status: 'SKIPPED', detail: 'no longer marked deceased' });
+  });
+
+  it('skips a contact a person turned "Do not contact" on for after the fetch', async () => {
+    await makeSpace(prisma, withDeceased);
+    await setContact(ids.neighbour, { custom_fields: MARKED_DECEASED });
+    const upserts: number[] = [];
+    const api: QomonApi = withOverrides({
+      searchContacts: async (
+        params: Parameters<QomonApi['searchContacts']>[0],
+      ) => {
+        const page = await qomon.searchContacts(params);
+        await setContact(ids.neighbour, { black_list: true });
+        return page;
+      },
+      upsertContact: (c: Parameters<QomonApi['upsertContact']>[0]) => {
+        upserts.push(c.id);
+        return qomon.upsertContact(c);
+      },
+    });
+    const result = await runContactRules(deps({ api }), hourly);
+    expect(result).toMatchObject({ stats: { deceasedPlanned: 1, skipped: 1 } });
+    expect(upserts).not.toContain(ids.neighbour);
+    expect(
+      await prisma.plannedWrite.findFirst({
+        where: { contactId: ids.neighbour },
+      }),
+    ).toMatchObject({ status: 'SKIPPED', detail: 'already "Do not contact"' });
+  });
+});
+
+describe('mergeUpserts', () => {
+  it('concatenates array fields and keeps scalar ones', () => {
+    expect(
+      mergeUpserts(9, [
+        { custom_fields: [{ id: 1, value: 'a' }] },
+        { custom_fields: [{ id: 2, value: 'b' }], black_list: true },
+      ]),
+    ).toEqual({
+      id: 9,
+      custom_fields: [
+        { id: 1, value: 'a' },
+        { id: 2, value: 'b' },
+      ],
+      black_list: true,
+    });
   });
 });

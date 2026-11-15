@@ -47,11 +47,14 @@ describe('resolveDeceasedConfig', () => {
     ).toBeNull();
   });
 
-  it('refuses a missing field, a text field, or a missing value', () => {
+  it('refuses a missing field, two fields with the label, a text field, or a missing value', () => {
     const settings = { deceasedField: 'Deceased', deceasedValue: 'yes' };
     expect(() => resolveDeceasedConfig([], settings)).toThrow(
       DeceasedConfigError,
     );
+    expect(() =>
+      resolveDeceasedConfig([FIELD, { ...FIELD, id: 8 }], settings),
+    ).toThrow(/found 2/);
     expect(() =>
       resolveDeceasedConfig([{ ...FIELD, type: 'text' }], settings),
     ).toThrow(/checkbox or single choice/);
@@ -67,6 +70,13 @@ describe('deceasedStateOf', () => {
     expect(deceasedStateOf(contact(['yes', 'no']), config)).toBe('ambiguous');
     expect(deceasedStateOf(contact(['no']), config)).toBe('other');
     expect(deceasedStateOf(contact([]), config)).toBe('none');
+  });
+
+  it('ignores a deleted answer', () => {
+    const deleted = contact(['yes']);
+    deleted.custom_fields![0]!.deleted_at = '2026-10-01T15:00:00Z';
+    expect(deceasedStateOf(deleted, config)).toBe('none');
+    expect(planDeceased([deleted], config, new Map()).writes).toEqual([]);
   });
 });
 
@@ -110,19 +120,21 @@ describe('planDeceased', () => {
   it('asks for review when a contact the job blacklisted is no longer marked but still blacklisted', () => {
     const written = contact(['no'], true);
     const found = contact([], true);
+    const overridden = contact([], false);
     const plan = planDeceased(
-      [written, found],
+      [written, found, overridden],
       config,
       new Map([
         [written.id!, 'WRITTEN'],
         [found.id!, 'FOUND'],
+        [overridden.id!, 'WRITTEN'],
       ]),
     );
-    expect(plan.rearm).toEqual([written.id, found.id]);
+    expect(plan.rearm).toEqual([written.id, found.id, overridden.id]);
     expect(plan.review).toEqual([written.id]);
     expect(plan.stats).toMatchObject({
       deceasedOtherValue: 1,
-      deceasedRearmed: 2,
+      deceasedRearmed: 3,
       deceasedReview: 1,
     });
   });

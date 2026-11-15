@@ -89,10 +89,6 @@ export function deceasedStateOf(
   return 'other';
 }
 
-export function isBlacklisted(contact: QomonContact): boolean {
-  return contact.black_list === true;
-}
-
 export type Handled = ReadonlyMap<number, 'WRITTEN' | 'FOUND'>;
 
 export interface DeceasedPlanStats {
@@ -153,14 +149,14 @@ export function planDeceased(
     if (state === 'deceased') {
       plan.stats.deceased += 1;
       if (handling) continue;
-      if (isBlacklisted(contact)) plan.found.push(id);
+      if (contact.black_list === true) plan.found.push(id);
       else plan.writes.push(id);
       continue;
     }
     if (state === 'other') plan.stats.deceasedOtherValue += 1;
     if (handling) {
       plan.rearm.push(id);
-      if (handling === 'WRITTEN' && isBlacklisted(contact))
+      if (handling === 'WRITTEN' && contact.black_list === true)
         plan.review.push(id);
     }
   }
