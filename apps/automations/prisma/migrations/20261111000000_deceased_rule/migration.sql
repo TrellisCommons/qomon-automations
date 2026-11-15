@@ -2,7 +2,7 @@
 UPDATE "job_run" SET "job" = 'contact-rules' WHERE "job" = 'household-match';
 
 -- CreateEnum
-CREATE TYPE "DeceasedHandling" AS ENUM ('WRITTEN', 'FOUND');
+CREATE TYPE "DeceasedHandling" AS ENUM ('SENT', 'WRITTEN', 'FOUND', 'REVIEW');
 
 -- AlterTable
 ALTER TABLE "space" ADD COLUMN     "deceasedField" TEXT,
@@ -15,6 +15,7 @@ CREATE TABLE "handled_deceased" (
     "handling" "DeceasedHandling" NOT NULL,
     "runId" TEXT NOT NULL,
     "at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "reviewNotifiedAt" TIMESTAMP(3),
 
     CONSTRAINT "handled_deceased_pkey" PRIMARY KEY ("spaceKey","contactId")
 );

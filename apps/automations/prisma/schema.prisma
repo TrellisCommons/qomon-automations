@@ -129,22 +129,30 @@ model PlannedWrite {
 }
 
 enum DeceasedHandling {
+  /// the job sent "Do not contact" but has not seen it land
+  SENT
   /// the job turned on "Do not contact"
   WRITTEN
   /// "Do not contact" was already on when the job first saw the mark
   FOUND
+  /// the job turned on "Do not contact", the mark is gone, and it is still
+  /// on: a person decides whether to turn it off
+  REVIEW
 }
 
 /// Deceased contacts the deceased rule has dealt with, so it acts once per
 /// marking: a person who later turns "Do not contact" off wins. The row goes
-/// when a run sees the contact without the mark, so marking it again acts
-/// again.
+/// when a run sees the contact without the mark and nothing is left for a
+/// person to decide, so marking it again acts again. Rows hold for one
+/// deceased field and value; changing either deletes the space's rows.
 model HandledDeceased {
-  spaceKey  String
-  contactId Int
-  handling  DeceasedHandling
-  runId     String
-  at        DateTime         @default(now())
+  spaceKey         String
+  contactId        Int
+  handling         DeceasedHandling
+  runId            String
+  at               DateTime         @default(now())
+  /// for REVIEW: when Slack accepted the message listing the contact
+  reviewNotifiedAt DateTime?
 
   space Space @relation(fields: [spaceKey], references: [key])
 

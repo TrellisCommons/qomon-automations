@@ -37,7 +37,7 @@ Locally, `pnpm build` then `pnpm job <command>` with a `.env` (see `.env.example
      --deceased-field "Deceased" --deceased-value yes
    ```
 
-   `--deceased-value` is the option's **stored** value (`yes` by default). `--deceased-field ''` turns the rule off.
+   `--deceased-value` is the option's **stored** value (`yes` by default). `--deceased-field ''` turns the rule off. Turning it off, or changing the field or value, forgets which contacts the rule handled, including ones a person turned "Do not contact" off for. Turning it on again acts as the first time did: backfill first.
 4. **Check the config against Qomon:** `job space:check --key <space-key>` lists the Presence form's values, confirms every configured value is on it, and says whether the deceased rule is on.
 
 ## Backfill
@@ -50,17 +50,17 @@ The first run catches up on every address knocked so far and, with the deceased 
    job contact-rules --space <space-key> --backfill --report /root/backfill-dry-run.csv
    ```
 
-   The output line has the counts. Household match: `fetched`, `outsideMunicipality`, `unkeyable`, `households`, `canvassedHouseholds`, `alreadyHavePresence`, `planned`, and `remarks`. Deceased: `deceased`, `deceasedPlanned` ("Do not contact" to turn on), `deceasedAmbiguous`, and `deceasedOtherValue` (contacts holding only another option, such as "NOT deceased", to clean up by hand).
+   The output line has the counts. `plannedWrites` is every rule's writes, the number the write limit is checked against. Household match: `fetched`, `outsideMunicipality`, `unkeyable`, `households`, `canvassedHouseholds`, `alreadyHavePresence`, `planned`, and `remarks`. Deceased: `deceased`, `deceasedPlanned` ("Do not contact" to turn on), `deceasedAmbiguous`, and `deceasedOtherValue` (contacts holding only another option, such as "NOT deceased", to clean up by hand).
 2. **Check a sample** of planned contacts in Qomon. A `presence` row should share an address with its `trigger_contact_id` and have no Presence; compare against the Google Sheet's List 1 (counts will differ: the job covers every contact, not only voters). A `blocklist` row should be marked deceased and not yet "Do not contact". Compare `deceased` with a Qomon list filtered on the deceased field.
 3. **Turn writes on** for the space, saying why:
 
    ```bash
    job space:writes --key <space-key> --on --reason "backfill checked: <who>, <sample size>"
    ```
-4. **Apply**, with `--max-writes` a little above the dry run's `planned` (new knocks land between the two runs):
+4. **Apply**, with `--max-writes` a little above the dry run's `plannedWrites` (new knocks land between the two runs):
 
    ```bash
-   job contact-rules --space <space-key> --backfill --apply --max-writes <rows in the dry-run report + 10%>
+   job contact-rules --space <space-key> --backfill --apply --max-writes <plannedWrites + 10%>
    ```
 
    It writes in batches of 20 contacts, one upsert per contact carrying all of its changes, and verifies each by reading it back. Each contact is a read, the upsert, and at least one read back, so at `QOMON_RPS=5` expect 1 to 2 writes per second, about 10 to 15 minutes per 1,000. `QOMON_RPS=8` (Qomon refills at 10 per second) brings that to about 7 minutes. If more than `MAX_FAILED_SHARE` of writes fail, it stops and turns the space's writes off. Over `--max-writes` it writes nothing and exits 2; dry-run again.
@@ -108,7 +108,7 @@ Each run posts to Slack only when something went wrong (a write failed, the run 
 
 ## When Slack lists contacts no longer marked deceased
 
-The deceased rule turned "Do not contact" on for these contacts, and someone has since removed the deceased mark without turning "Do not contact" off. The job never turns it off. For each contact, decide in Qomon: turn "Do not contact" off if the person is alive and may be contacted, or leave it. Each contact is listed once.
+The deceased rule turned "Do not contact" on for these contacts, and someone has since removed the deceased mark without turning "Do not contact" off. The job never turns it off. For each contact, decide in Qomon: turn "Do not contact" off if the person is alive and may be contacted, or leave it. A contact is listed on each run until a post succeeds, so a failed post is retried on the next run.
 
 ## After the election
 

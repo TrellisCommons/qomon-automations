@@ -2,6 +2,10 @@ import { existsSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { dirname, resolve, sep } from 'node:path';
 import type { PrismaClient } from './generated/prisma/index.js';
+import {
+  describePlanned,
+  type PlannedCounts,
+} from './jobs/contact-rules/counts.js';
 
 export class ReportInsideRepoError extends Error {
   constructor(path: string) {
@@ -61,8 +65,7 @@ export async function writeRunReport(
   return writes.length;
 }
 
-interface StoredStats {
-  planned?: number;
+interface StoredStats extends PlannedCounts {
   applied?: number;
   verified?: number;
   failed?: number;
@@ -95,7 +98,7 @@ export async function runStatus(
       const p = s.progress;
       const lines = [
         `${run.id}  ${run.kind.toLowerCase()}  ${run.status}  ${run.applying ? 'applying' : 'dry run'}  started ${run.startedAt.toISOString()}${run.finishedAt ? `  finished ${run.finishedAt.toISOString()}` : ''}`,
-        `  planned ${s.planned ?? '?'}  applied ${s.applied ?? 0}  verified ${s.verified ?? 0}  failed ${s.failed ?? 0}  skipped ${s.skipped ?? 0}`,
+        `  planned ${describePlanned(s)}  applied ${s.applied ?? 0}  verified ${s.verified ?? 0}  failed ${s.failed ?? 0}  skipped ${s.skipped ?? 0}`,
       ];
       if (p) {
         const pct = p.total ? Math.floor((p.done / p.total) * 100) : 100;

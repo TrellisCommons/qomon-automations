@@ -18,11 +18,13 @@ import type { HeldLock } from '../../lock.js';
 import type { Logger } from '../../log.js';
 import { resolveWriteMode } from '../../qomon/write-mode.js';
 import { getSpace, setWritesEnabled } from '../../spaces/spaces.js';
+import { describePlanned } from './counts.js';
 import {
   deceasedStateOf,
   planDeceased,
   resolveDeceasedConfig,
   type DeceasedConfig,
+  type DeceasedPlan,
   type DeceasedPlanStats,
   type Handled,
 } from './deceased.js';
@@ -95,6 +97,12 @@ export interface Progress {
 }
 
 export interface RunStats extends PlanStats, Partial<DeceasedPlanStats> {
+  /** every rule's writes: the number the write limit is checked against */
+  plannedWrites: number;
+  /** "Do not contact" turnings-on to write */
+  deceasedPlanned?: number;
+  /** contacts listed for a person to decide on */
+  deceasedReview?: number;
   limit: number;
   overLimit: boolean;
   skipped: number;
@@ -242,17 +250,23 @@ async function execute(
   const limit = opts.maxWrites ?? deps.env.MAX_WRITES_PER_RUN;
   const total =
     plan.writes.length + plan.remarks.length + (deceased?.writes.length ?? 0);
-  Object.assign(stats, plan.stats, deceased?.stats, {
-    limit,
-    overLimit: total > limit,
-  });
-  log.info({ ...plan.stats, ...deceased?.stats, limit }, 'planned');
+  Object.assign(
+    stats,
+    plan.stats,
+    deceased && {
+      ...deceased.stats,
+      deceasedPlanned: deceased.writes.length,
+      deceasedReview: deceased.notify.length,
+    },
+    { plannedWrites: total, limit, overLimit: total > limit },
+  );
+  log.info(stats, 'planned');
 
   if (deceased) {
     // What the job knows about deceased contacts is kept current on every
     // run, dry runs included: it records what Qomon shows, not a write.
     await recordHandled(deps.prisma, space.key, run.id, deceased);
-    review.push(...deceased.review);
+    review.push(...deceased.notify);
   }
 
   if (plan.writes.length > 0) {
@@ -308,7 +322,7 @@ async function execute(
       await trip(
         deps,
         space,
-        `run ${run.id} planned ${total} writes, over the limit of ${limit}`,
+        `run ${run.id} planned ${describePlanned(stats)}, over the limit of ${limit}`,
         log,
       );
     }
@@ -419,6 +433,25 @@ async function applyAndVerify(
             where: { id: { in: ready.map((w) => w.id) } },
             data: { status: 'APPLYING' },
           });
+          // Recorded before the upsert goes out, so a write that lands after
+          // verification gives up, or after the run dies, is still the job's.
+          if (ready.some((w) => w.field === BLOCKLIST_FIELD)) {
+            await ctx.tx.handledDeceased.upsert({
+              where: { spaceKey_contactId: { spaceKey: space.key, contactId } },
+              create: {
+                spaceKey: space.key,
+                contactId,
+                handling: 'SENT',
+                runId: run.id,
+              },
+              update: {
+                handling: 'SENT',
+                runId: run.id,
+                at: new Date(),
+                reviewNotifiedAt: null,
+              },
+            });
+          }
           for (const write of ready) {
             await ctx.log({
               subjectType: 'QomonContact',
@@ -623,8 +656,8 @@ export function mergeUpserts(
   return merged;
 }
 
-/** Record a verified write. A "Do not contact" write also marks the contact
- *  handled, so the rule leaves it alone from now on. */
+/** Record a verified write. A "Do not contact" write also records the
+ *  contact WRITTEN, so the rule leaves it alone from now on. */
 async function settleVerified(
   prisma: PrismaClient,
   spaceKey: string,
@@ -633,22 +666,29 @@ async function settleVerified(
   seen: { date: string | null },
   detail: string | null = null,
 ): Promise<void> {
-  await prisma.plannedWrite.update({
-    where: { id: write.id },
-    data: { status: 'VERIFIED', detail, writtenPresenceDate: seen.date },
-  });
-  if (write.field === BLOCKLIST_FIELD) {
-    await prisma.handledDeceased.upsert({
-      where: { spaceKey_contactId: { spaceKey, contactId: write.contactId } },
-      create: {
-        spaceKey,
-        contactId: write.contactId,
-        handling: 'WRITTEN',
-        runId,
-      },
-      update: { handling: 'WRITTEN', runId, at: new Date() },
+  await prisma.$transaction(async (tx) => {
+    await tx.plannedWrite.update({
+      where: { id: write.id },
+      data: { status: 'VERIFIED', detail, writtenPresenceDate: seen.date },
     });
-  }
+    if (write.field === BLOCKLIST_FIELD) {
+      await tx.handledDeceased.upsert({
+        where: { spaceKey_contactId: { spaceKey, contactId: write.contactId } },
+        create: {
+          spaceKey,
+          contactId: write.contactId,
+          handling: 'WRITTEN',
+          runId,
+        },
+        update: {
+          handling: 'WRITTEN',
+          runId,
+          at: new Date(),
+          reviewNotifiedAt: null,
+        },
+      });
+    }
+  });
 }
 
 async function trip(
@@ -717,7 +757,7 @@ async function report(
   const lines = failed
     ? [
         `:rotating_light: ${JOB}${opts.backfill ? ' (backfill)' : ''} on space \`${space.key}\`: ${result.status}`,
-        `planned ${s.planned ?? 0} household · ${s.remarks ?? 0} re-marks · ${s.deceasedPlanned ?? 0} do not contact · applied ${s.applied ?? 0} · verified ${s.verified ?? 0} · failed ${s.failed ?? 0} · skipped ${s.skipped ?? 0} · unkeyable ${s.unkeyable ?? 0}`,
+        `planned ${describePlanned(s)} · applied ${s.applied ?? 0} · verified ${s.verified ?? 0} · failed ${s.failed ?? 0} · skipped ${s.skipped ?? 0} · unkeyable ${s.unkeyable ?? 0}`,
         ...(result.status === 'TRIPPED' && !opts.backfill
           ? [
               'Writes are now off for this space. Look at the run, then turn them back on with `space:writes --on`.',
@@ -735,6 +775,16 @@ async function report(
   lines.push(`space \`${space.key}\` · run \`${result.runId}\``);
   try {
     await deps.notify(lines.join('\n'));
+    // A contact stays listed on every run until Slack takes the message.
+    if (result.review.length > 0)
+      await deps.prisma.handledDeceased.updateMany({
+        where: {
+          spaceKey: space.key,
+          contactId: { in: result.review },
+          handling: 'REVIEW',
+        },
+        data: { reviewNotifiedAt: (deps.now ?? (() => new Date()))() },
+      });
   } catch (err) {
     log.error(
       { err: err instanceof Error ? err.message : String(err) },
@@ -882,19 +932,29 @@ async function loadHandled(
   spaceKey: string,
 ): Promise<Handled> {
   const rows = await prisma.handledDeceased.findMany({ where: { spaceKey } });
-  return new Map(rows.map((r) => [r.contactId, r.handling]));
+  return new Map(
+    rows.map((r) => [
+      r.contactId,
+      { handling: r.handling, notified: r.reviewNotifiedAt !== null },
+    ]),
+  );
 }
 
-/** Contacts found already blocklisted become handled; contacts no longer
- *  marked are forgotten, so marking them again acts again. */
+/** Record what the plan found in Qomon (see `DeceasedPlan`). */
 async function recordHandled(
   prisma: PrismaClient,
   spaceKey: string,
   runId: string,
-  plan: { found: number[]; rearm: number[] },
+  plan: DeceasedPlan,
 ): Promise<void> {
-  if (plan.found.length > 0) {
-    await prisma.handledDeceased.createMany({
+  const at = new Date();
+  const set = (contactIds: number[], handling: 'WRITTEN' | 'REVIEW') =>
+    prisma.handledDeceased.updateMany({
+      where: { spaceKey, contactId: { in: contactIds } },
+      data: { handling, runId, at, reviewNotifiedAt: null },
+    });
+  await prisma.$transaction([
+    prisma.handledDeceased.createMany({
       data: plan.found.map((contactId) => ({
         spaceKey,
         contactId,
@@ -902,13 +962,13 @@ async function recordHandled(
         runId,
       })),
       skipDuplicates: true,
-    });
-  }
-  if (plan.rearm.length > 0) {
-    await prisma.handledDeceased.deleteMany({
-      where: { spaceKey, contactId: { in: plan.rearm } },
-    });
-  }
+    }),
+    set(plan.written, 'WRITTEN'),
+    set(plan.review, 'REVIEW'),
+    prisma.handledDeceased.deleteMany({
+      where: { spaceKey, contactId: { in: plan.forget } },
+    }),
+  ]);
 }
 
 /** Contacts this job wrote and verified in the space, with the Presence date

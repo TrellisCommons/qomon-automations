@@ -1,10 +1,13 @@
 import type { QomonContact, QomonForm } from '@trellis/qomon-client';
 import { describe, expect, it } from 'vitest';
+import type { DeceasedHandling } from '../../generated/prisma/index.js';
 import {
   DeceasedConfigError,
   deceasedStateOf,
   planDeceased,
   resolveDeceasedConfig,
+  type DeceasedPlan,
+  type Handled,
 } from './deceased.js';
 
 const FIELD: QomonForm = {
@@ -80,75 +83,104 @@ describe('deceasedStateOf', () => {
   });
 });
 
+function handled(
+  entries: Array<[QomonContact, DeceasedHandling, boolean?]>,
+): Handled {
+  return new Map(
+    entries.map(([c, handling, notified = false]) => [
+      c.id!,
+      { handling, notified },
+    ]),
+  );
+}
+
+/** the one list of the plan a contact lands in, or none */
+function listOf(plan: DeceasedPlan, c: QomonContact): string[] {
+  return (['writes', 'found', 'written', 'review', 'forget'] as const).filter(
+    (k) => plan[k].includes(c.id!),
+  );
+}
+
 describe('planDeceased', () => {
-  it('turns "Do not contact" on for a marked contact the rule has not handled', () => {
-    const marked = contact(['yes']);
-    const plan = planDeceased([marked, contact([])], config, new Map());
-    expect(plan.writes).toEqual([marked.id]);
-    expect(plan.stats).toMatchObject({ deceased: 1, deceasedPlanned: 1 });
-  });
-
-  it('records a marked contact already blocklisted as handled, writing nothing', () => {
-    const marked = contact(['yes'], true);
-    const plan = planDeceased([marked], config, new Map());
-    expect(plan.writes).toEqual([]);
-    expect(plan.found).toEqual([marked.id]);
-  });
-
-  it('leaves a handled contact alone, even once a person turns "Do not contact" off', () => {
-    const overridden = contact(['yes'], false);
+  it.each<
+    [string, Array<'yes' | 'no'>, boolean, DeceasedHandling | null, string[]]
+  >([
+    ['marked, not handled', ['yes'], false, null, ['writes']],
+    [
+      'marked, not handled, already blocklisted',
+      ['yes'],
+      true,
+      null,
+      ['found'],
+    ],
+    ['marked, sent, landed late', ['yes'], true, 'SENT', ['written']],
+    ['marked, sent, never landed', ['yes'], false, 'SENT', ['writes']],
+    ['marked, written, a person turned it off', ['yes'], false, 'WRITTEN', []],
+    ['marked, found', ['yes'], true, 'FOUND', []],
+    ['marked again while under review', ['yes'], true, 'REVIEW', ['written']],
+    [
+      'marked again after a person turned it off',
+      ['yes'],
+      false,
+      'REVIEW',
+      ['writes'],
+    ],
+    ['unmarked, found', [], true, 'FOUND', ['forget']],
+    ['unmarked, written, still blocklisted', [], true, 'WRITTEN', ['review']],
+    ['unmarked, sent, landed', ['no'], true, 'SENT', ['review']],
+    [
+      'unmarked, written, a person turned it off',
+      [],
+      false,
+      'WRITTEN',
+      ['forget'],
+    ],
+    [
+      'unmarked, under review, a person turned it off',
+      [],
+      false,
+      'REVIEW',
+      ['forget'],
+    ],
+    ['unmarked, under review, undecided', [], true, 'REVIEW', []],
+    ['both values, handled', ['yes', 'no'], true, 'WRITTEN', []],
+    ['both values, not handled', ['yes', 'no'], false, null, []],
+  ])('%s', (_, values, blocklisted, handling, lists) => {
+    const c = contact(values, blocklisted);
     const plan = planDeceased(
-      [overridden],
+      [c],
       config,
-      new Map([[overridden.id!, 'WRITTEN']]),
+      handled(handling ? [[c, handling]] : []),
     );
-    expect(plan.writes).toEqual([]);
-    expect(plan.rearm).toEqual([]);
+    expect(listOf(plan, c)).toEqual(lists);
   });
 
-  it('forgets a handled contact no longer marked, so marking it again acts again', () => {
-    const unmarked = contact([]);
+  it('lists a contact under review in Slack until Slack has taken it', () => {
+    const fresh = contact([], true);
+    const pending = contact([], true);
+    const listed = contact([], true);
     const plan = planDeceased(
-      [unmarked],
+      [fresh, pending, listed],
       config,
-      new Map([[unmarked.id!, 'FOUND']]),
-    );
-    expect(plan.rearm).toEqual([unmarked.id]);
-    expect(plan.review).toEqual([]);
-  });
-
-  it('asks for review when a contact the job blocklisted is no longer marked but still blocklisted', () => {
-    const written = contact(['no'], true);
-    const found = contact([], true);
-    const overridden = contact([], false);
-    const plan = planDeceased(
-      [written, found, overridden],
-      config,
-      new Map([
-        [written.id!, 'WRITTEN'],
-        [found.id!, 'FOUND'],
-        [overridden.id!, 'WRITTEN'],
+      handled([
+        [fresh, 'WRITTEN'],
+        [pending, 'REVIEW', false],
+        [listed, 'REVIEW', true],
       ]),
     );
-    expect(plan.rearm).toEqual([written.id, found.id, overridden.id]);
-    expect(plan.review).toEqual([written.id]);
-    expect(plan.stats).toMatchObject({
-      deceasedOtherValue: 1,
-      deceasedRearmed: 3,
-      deceasedReview: 1,
-    });
+    expect(plan.notify).toEqual([fresh.id, pending.id]);
   });
 
-  it('skips a contact with both the deceased value and another, handled or not', () => {
-    const both = contact(['yes', 'no']);
-    const handledBoth = contact(['yes', 'no'], true);
+  it('counts marked, ambiguous, and other-value contacts', () => {
     const plan = planDeceased(
-      [both, handledBoth],
+      [contact(['yes']), contact(['yes', 'no']), contact(['no']), contact([])],
       config,
-      new Map([[handledBoth.id!, 'WRITTEN']]),
+      new Map(),
     );
-    expect(plan.writes).toEqual([]);
-    expect(plan.rearm).toEqual([]);
-    expect(plan.stats.deceasedAmbiguous).toBe(2);
+    expect(plan.stats).toEqual({
+      deceased: 1,
+      deceasedAmbiguous: 1,
+      deceasedOtherValue: 1,
+    });
   });
 });

@@ -97,11 +97,28 @@ export async function saveSpace(
               writesEnabled: false,
             },
           });
+      // What the deceased rule handled holds for one field and value, and
+      // nothing tracks the contacts while the rule is off.
+      const deceasedChanged =
+        before !== null &&
+        (before.deceasedField !== after.deceasedField ||
+          before.deceasedValue !== after.deceasedValue);
+      const forgotten = deceasedChanged
+        ? (
+            await ctx.tx.handledDeceased.deleteMany({
+              where: { spaceKey: config.key },
+            })
+          ).count
+        : 0;
       await ctx.log({
         subjectType: 'Space',
         subjectId: config.key,
         before: before ? redact(before) : null,
-        after: { ...redact(after), apiKeyChanged: Boolean(encrypted) },
+        after: {
+          ...redact(after),
+          apiKeyChanged: Boolean(encrypted),
+          ...(deceasedChanged ? { handledDeceasedForgotten: forgotten } : {}),
+        },
       });
       return after;
     },

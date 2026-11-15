@@ -44,7 +44,17 @@ Two contacts share an address when their [address keys](../../packages/address-m
 2. A marked contact that is not "Do not contact" (`black_list`) gets it turned on, once per marking.
 3. The rule never turns "Do not contact" off and never changes the deceased field.
 
-"Once per marking" is kept in `handled_deceased`. A contact goes in when the job's write is verified (`WRITTEN`), or when a run first sees it marked and already "Do not contact" (`FOUND`). A handled contact is left alone, so a person who turns "Do not contact" off wins. It comes out when a run sees it no longer marked, so marking it again acts again. Qomon's UI only lets the deceased field be edited once "Do not contact" is off, so a correction already happens in that order.
+"Once per marking" is kept in `handled_deceased`, one row per contact. A handled contact is left alone, so a person who turns "Do not contact" off wins. The row comes out when a run sees the contact no longer marked and nothing is left for a person to decide, so marking it again acts again. Qomon's UI only lets the deceased field be edited once "Do not contact" is off, so a correction already happens in that order.
+
+| Handling | Means | Next run, contact marked | Next run, contact not marked |
+|---|---|---|---|
+| none | | blocklisted: `FOUND`; otherwise write, recording `SENT` | nothing |
+| `SENT` | the job sent the upsert, recorded in the change-log transaction before it goes out | blocklisted: `WRITTEN`; otherwise write again | blocklisted: `REVIEW`; otherwise forget |
+| `WRITTEN` | the job's write is verified | nothing | blocklisted: `REVIEW`; otherwise forget |
+| `FOUND` | blocklisted by someone else before the job saw the mark | nothing | forget |
+| `REVIEW` | the job's write, mark gone, still blocklisted | blocklisted: `WRITTEN`; otherwise write | blocklisted: listed in Slack until Slack takes the message; otherwise forget |
+
+`SENT` comes before the upsert, not after verification, so a write that lands after `VERIFY_TIMEOUT_SECONDS`, or after its run dies, is still recognised as the job's. A `SENT` write that never landed is sent again, which turns "Do not contact" back on if a person turned it off within the hour after a late landing. The rows hold for one deceased field and value: changing either, or turning the rule off, deletes the space's rows, since nothing tracks the contacts while the rule is off. Turning the rule back on then acts as the first time did.
 
 Edge cases:
 
@@ -53,7 +63,7 @@ Edge cases:
 | Deceased value plus another value of a checkbox (for example "NOT deceased") | nothing, counted `deceasedAmbiguous`; a handled contact stays handled |
 | Only another value | nothing, counted `deceasedOtherValue` for cleanup by hand (an upsert cannot clear a custom field) |
 | Handled, then unmarked and marked again between two runs | stays handled: the run never saw it unmarked |
-| Handled `WRITTEN`, now unmarked, still "Do not contact" | forgotten, and listed in Slack for a person to decide; the job does not turn it off |
+| Blocklisted by the job, now unmarked, still "Do not contact" | `REVIEW`, listed in Slack for a person to decide; the job does not turn it off |
 | Duplicate record of the same person | not touched; the rule reads only the deceased field |
 
 ## Decisions
@@ -66,8 +76,8 @@ Edge cases:
 - **One search per run, filtered in code.** Search returns each contact's Presence inline, and its `eql` is a token match, so the job fetches the whole space and applies the municipality filter itself. A contact whose city is blank is in scope.
 - **The earliest canvassed Presence at an address is the trigger.** Its id is on every planned write. Qomon cannot set a Presence date, so the written date is when the write landed.
 - **Re-read before each write.** Presence is one value per contact and an upsert replaces it, so a visit recorded between the fetch and the write would be overwritten. Each contact is re-read just before its upsert, and each of its changes is dropped if it no longer applies: a household value if the contact now has a Presence or its address key changed, a "Do not contact" if the contact is no longer marked deceased or is already "Do not contact". This narrows the race to a few seconds; Qomon has no conditional write to close it.
-- **"Do not contact" is only turned on.** An upsert cannot turn it off, and whether a contact is alive is a person's call. When the mark is removed from a contact the job blocklisted and it is still "Do not contact", Slack lists it once.
-- **Deceased state is recorded on dry runs too.** Adding `FOUND` contacts and forgetting unmarked ones records what Qomon shows, not a change to Qomon, so it happens on every run. Otherwise a space with writes off would miss the unmarking it needs to act again later.
+- **"Do not contact" is only turned on.** An upsert cannot turn it off, and whether a contact is alive is a person's call. When the mark is removed from a contact the job blocklisted and it is still "Do not contact", Slack lists it on each run until Slack takes the message.
+- **Deceased state is recorded on dry runs too.** Every handling change except `SENT` records what Qomon shows, not a change to Qomon, so it happens on every run. Otherwise a space with writes off would miss the unmarking it needs to act again later.
 - **Verify every write.** Upsert answers 202 before doing anything. Writes go in batches of 20 contacts; each batch is read back every 3 seconds until every write shows (a household value with its marker, recording its Presence date; a re-mark; "Do not contact" on), shows something else (failed), or `VERIFY_TIMEOUT_SECONDS` passes (failed).
 - **Change log before the upsert.** Each write's `ChangeLogEntry` (for a household value, before: no Presence, after: the value and the trigger; for "Do not contact", before: off, after: on) is committed before the upsert is sent, so the audit trail never misses a write that reached Qomon. A write that then fails is marked `FAILED` on its `PlannedWrite`. The change-log table is append-only (a database trigger).
 - **Backfill is the same run with an explicit limit.** The first run over a space with weeks of canvassing, or the first run with the deceased rule on over a space with many marked contacts, plans far more than `MAX_WRITES_PER_RUN`; every rule's writes count toward it. `--backfill` records the run as a backfill and requires `--max-writes` to apply. Over that limit it writes nothing but leaves the space on, since a person chose the number.
@@ -93,7 +103,7 @@ A write reaches Qomon only when `QOMON_WRITES_ALLOWED=true` (the droplet only), 
 | `space` | config, the encrypted Qomon API key (AES-256-GCM with `SPACE_SECRET_KEY`), `writesEnabled`, `activeUntil` |
 | `job_run` | one row per run: kind (hourly or backfill), whether it applied, status, counts |
 | `planned_write` | one row per planned change: Qomon contact id, field (`presence`, `presence_source`, `blocklist`), trigger contact id, value, reason, outcome |
-| `handled_deceased` | deceased contacts the rule has dealt with: Qomon contact id, `WRITTEN` or `FOUND`, the run |
+| `handled_deceased` | deceased contacts the rule has dealt with: Qomon contact id, handling (`SENT`, `WRITTEN`, `FOUND`, `REVIEW`), the run, when Slack listed a `REVIEW` |
 | `change_log_entry` | append-only audit trail of every change to Qomon or to a space |
 
 No names, addresses, or Presence values of other contacts are stored: only Qomon ids, the trigger's value in the reason, and counts.

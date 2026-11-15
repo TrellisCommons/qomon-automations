@@ -3,6 +3,7 @@ import type {
   QomonForm,
   QomonRefValue,
 } from '@trellis/qomon-client';
+import type { DeceasedHandling } from '../../generated/prisma/index.js';
 
 /**
  * The deceased rule, as pure functions over a fetched space.
@@ -12,9 +13,10 @@ import type {
  * calls, and door knocks. The rule acts once per marking: once it has turned
  * "Do not contact" on, or found it already on, it leaves the contact alone,
  * so a person who turns it off again wins. A run that sees the contact
- * without the mark forgets it, so marking it again acts again. Qomon's UI
- * only lets the deceased field be edited once "Do not contact" is off, which
- * keeps a correction in that order.
+ * without the mark forgets it, so marking it again acts again, unless the
+ * job turned "Do not contact" on and it is still on: then a person is asked
+ * to decide. Qomon's UI only lets the deceased field be edited once
+ * "Do not contact" is off, which keeps a correction in that order.
  *
  * "Do not contact" is only ever turned on: an upsert cannot turn it off, and
  * undoing a mark is a person's decision.
@@ -57,13 +59,15 @@ export function resolveDeceasedConfig(
       `custom field ${label} is ${JSON.stringify(field.type)}; it must be a checkbox or single choice`,
     );
   }
-  const ref = field.refvalues.find((r) => r.value === settings.deceasedValue);
+  const ref = field.refvalues.find(
+    (r): r is DeceasedConfig['value'] => r.value === settings.deceasedValue,
+  );
   if (!ref) {
     throw new DeceasedConfigError(
       `custom field ${label} has no value ${JSON.stringify(settings.deceasedValue)} (it has ${field.refvalues.map((r) => JSON.stringify(r.value ?? '')).join(', ')})`,
     );
   }
-  return { field, value: { ...ref, value: settings.deceasedValue } };
+  return { field, value: ref };
 }
 
 export type DeceasedState =
@@ -89,7 +93,14 @@ export function deceasedStateOf(
   return 'other';
 }
 
-export type Handled = ReadonlyMap<number, 'WRITTEN' | 'FOUND'>;
+/** What the rule has done about a contact, as `handled_deceased` records it. */
+export interface HandledContact {
+  handling: DeceasedHandling;
+  /** for REVIEW: Slack has listed it */
+  notified: boolean;
+}
+
+export type Handled = ReadonlyMap<number, HandledContact>;
 
 export interface DeceasedPlanStats {
   deceased: number;
@@ -97,24 +108,24 @@ export interface DeceasedPlanStats {
   deceasedAmbiguous: number;
   /** holding only another value of the field, such as "no" */
   deceasedOtherValue: number;
-  /** "Do not contact" turnings-on to write */
-  deceasedPlanned: number;
-  /** marks forgotten because the contact is no longer marked */
-  deceasedRearmed: number;
-  /** of those, contacts the job blocklisted that are still blocklisted */
-  deceasedReview: number;
 }
 
+/** Each list holds contact ids, sorted. */
 export interface DeceasedPlan {
-  /** contacts to turn "Do not contact" on for */
+  /** turn "Do not contact" on; recorded SENT as each upsert goes out */
   writes: number[];
-  /** marked and already blocklisted: record as handled, write nothing */
+  /** marked and already blocklisted by someone else: record FOUND */
   found: number[];
-  /** handled before but no longer marked: forget */
-  rearm: number[];
-  /** rearmed contacts the job blocklisted that are still blocklisted: a
-   *  person should decide whether to turn "Do not contact" off */
+  /** marked and blocklisted by the job: record WRITTEN */
+  written: number[];
+  /** blocklisted by the job, no longer marked, still blocklisted: record
+   *  REVIEW, for a person to decide whether to turn it off */
   review: number[];
+  /** no longer marked, and nothing left to decide: forget, so marking the
+   *  contact again acts again */
+  forget: number[];
+  /** REVIEW contacts Slack has not listed yet */
+  notify: number[];
   stats: DeceasedPlanStats;
 }
 
@@ -126,44 +137,78 @@ export function planDeceased(
   const plan: DeceasedPlan = {
     writes: [],
     found: [],
-    rearm: [],
+    written: [],
     review: [],
-    stats: {
-      deceased: 0,
-      deceasedAmbiguous: 0,
-      deceasedOtherValue: 0,
-      deceasedPlanned: 0,
-      deceasedRearmed: 0,
-      deceasedReview: 0,
-    },
+    forget: [],
+    notify: [],
+    stats: { deceased: 0, deceasedAmbiguous: 0, deceasedOtherValue: 0 },
   };
   for (const contact of contacts) {
     const id = contact.id;
     if (id === undefined) continue;
     const state = deceasedStateOf(contact, config);
-    const handling = handled.get(id);
     if (state === 'ambiguous') {
       plan.stats.deceasedAmbiguous += 1;
       continue;
     }
+    const prior = handled.get(id);
+    const blocklisted = contact.black_list === true;
     if (state === 'deceased') {
       plan.stats.deceased += 1;
-      if (handling) continue;
-      if (contact.black_list === true) plan.found.push(id);
-      else plan.writes.push(id);
+      planMarked(plan, id, prior, blocklisted);
       continue;
     }
     if (state === 'other') plan.stats.deceasedOtherValue += 1;
-    if (handling) {
-      plan.rearm.push(id);
-      if (handling === 'WRITTEN' && contact.black_list === true)
-        plan.review.push(id);
-    }
+    if (prior) planUnmarked(plan, id, prior, blocklisted);
   }
-  for (const list of [plan.writes, plan.found, plan.rearm, plan.review])
+  for (const list of [
+    plan.writes,
+    plan.found,
+    plan.written,
+    plan.review,
+    plan.forget,
+    plan.notify,
+  ])
     list.sort((a, b) => a - b);
-  plan.stats.deceasedPlanned = plan.writes.length;
-  plan.stats.deceasedRearmed = plan.rearm.length;
-  plan.stats.deceasedReview = plan.review.length;
   return plan;
+}
+
+function planMarked(
+  plan: DeceasedPlan,
+  id: number,
+  prior: HandledContact | undefined,
+  blocklisted: boolean,
+): void {
+  switch (prior?.handling) {
+    case undefined:
+      (blocklisted ? plan.found : plan.writes).push(id);
+      return;
+    // A SENT write that shows up late is the job's. One that never showed
+    // up is sent again.
+    case 'SENT':
+    case 'REVIEW':
+      (blocklisted ? plan.written : plan.writes).push(id);
+      return;
+    case 'WRITTEN':
+    case 'FOUND':
+      return;
+  }
+}
+
+function planUnmarked(
+  plan: DeceasedPlan,
+  id: number,
+  prior: HandledContact,
+  blocklisted: boolean,
+): void {
+  if (!blocklisted || prior.handling === 'FOUND') {
+    plan.forget.push(id);
+    return;
+  }
+  if (prior.handling === 'REVIEW') {
+    if (!prior.notified) plan.notify.push(id);
+    return;
+  }
+  plan.review.push(id);
+  plan.notify.push(id);
 }
