@@ -887,6 +887,100 @@ describe('deceased rule', () => {
       }),
     ).toMatchObject({ status: 'SKIPPED', detail: 'already "Do not contact"' });
   });
+
+  it('lists a contact for review again when the Slack message about it fails', async () => {
+    await makeSpace(prisma, withDeceased);
+    await setContact(ids.neighbour, { custom_fields: MARKED_DECEASED });
+    await runContactRules(deps(), hourly);
+    await setContact(ids.neighbour, { custom_fields: [] });
+
+    const slackDown = deps({
+      notify: vi.fn(async () => {
+        throw new Error('Slack answered 503');
+      }),
+    });
+    await runContactRules(slackDown, hourly);
+
+    const d = deps();
+    const next = await runContactRules(d, hourly);
+    expect(next).toMatchObject({ review: [ids.neighbour] });
+    expect(d.notify).toHaveBeenCalledOnce();
+  });
+
+  it('treats a "Do not contact" write that lands after verification gave up as its own', async () => {
+    await makeSpace(prisma, withDeceased);
+    await setContact(ids.neighbour, { custom_fields: MARKED_DECEASED });
+    const dropsBlocklist = withOverrides({
+      upsertContact: async (c: Parameters<QomonApi['upsertContact']>[0]) => {
+        if (c.black_list) return;
+        return qomon.upsertContact(c);
+      },
+    });
+    await runContactRules(deps({ api: dropsBlocklist }), hourly);
+    // the upsert the job sent shows up after VERIFY_TIMEOUT_SECONDS
+    await setContact(ids.neighbour, { black_list: true });
+    await runContactRules(deps(), hourly);
+    await setContact(ids.neighbour, { custom_fields: [] });
+
+    const result = await runContactRules(deps(), hourly);
+    expect(result).toMatchObject({ review: [ids.neighbour] });
+  });
+
+  it('treats a verified "Do not contact" write as its own when the run died before recording it handled', async () => {
+    const space = await makeSpace(prisma, withDeceased);
+    await setContact(ids.neighbour, {
+      custom_fields: MARKED_DECEASED,
+      black_list: true,
+    });
+    const dead = await prisma.jobRun.create({
+      data: {
+        job: 'contact-rules',
+        spaceKey: space.key,
+        kind: 'HOURLY',
+        applying: true,
+        status: 'INTERRUPTED',
+      },
+    });
+    await prisma.plannedWrite.create({
+      data: {
+        runId: dead.id,
+        contactId: ids.neighbour,
+        field: 'blocklist',
+        valueBefore: 'false',
+        valueAfter: 'true',
+        triggerContactId: ids.neighbour,
+        reason: 'marked deceased (Deceased)',
+        status: 'VERIFIED',
+      },
+    });
+    await runContactRules(deps(), hourly);
+    await setContact(ids.neighbour, { custom_fields: [] });
+
+    const result = await runContactRules(deps(), hourly);
+    expect(result).toMatchObject({ review: [ids.neighbour] });
+  });
+
+  it('acts on a contact marked again while the rule was off', async () => {
+    const space = await makeSpace(prisma, withDeceased);
+    await setContact(ids.neighbour, { custom_fields: MARKED_DECEASED });
+    await runContactRules(deps(), hourly);
+
+    await prisma.space.update({
+      where: { key: space.key },
+      data: { deceasedField: null },
+    });
+    await setContact(ids.neighbour, { black_list: false, custom_fields: [] });
+    await runContactRules(deps(), hourly);
+    await setContact(ids.neighbour, { custom_fields: MARKED_DECEASED });
+    await prisma.space.update({
+      where: { key: space.key },
+      data: { deceasedField: 'Deceased' },
+    });
+
+    const result = await runContactRules(deps(), hourly);
+    expect(result).toMatchObject({ stats: { deceasedPlanned: 1 } });
+    expect((await qomon.getContact(ids.neighbour)).black_list).toBe(true);
+  });
 });
 
 describe('mergeUpserts', () => {
