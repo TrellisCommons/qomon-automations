@@ -101,18 +101,18 @@ export interface DeceasedPlanStats {
   deceasedPlanned: number;
   /** marks forgotten because the contact is no longer marked */
   deceasedRearmed: number;
-  /** of those, contacts the job blacklisted that are still blacklisted */
+  /** of those, contacts the job blocklisted that are still blocklisted */
   deceasedReview: number;
 }
 
 export interface DeceasedPlan {
   /** contacts to turn "Do not contact" on for */
   writes: number[];
-  /** marked and already blacklisted: record as handled, write nothing */
+  /** marked and already blocklisted: record as handled, write nothing */
   found: number[];
   /** handled before but no longer marked: forget */
   rearm: number[];
-  /** rearmed contacts the job blacklisted that are still blacklisted: a
+  /** rearmed contacts the job blocklisted that are still blocklisted: a
    *  person should decide whether to turn "Do not contact" off */
   review: number[];
   stats: DeceasedPlanStats;

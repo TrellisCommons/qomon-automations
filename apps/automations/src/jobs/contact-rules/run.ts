@@ -53,7 +53,7 @@ const VERIFY_POLL_MS = 3_000;
 /** PlannedWrite.field of each kind of change */
 const PRESENCE_FIELD = 'presence';
 const REMARK_FIELD = 'presence_source';
-const BLACKLIST_FIELD = 'black_list';
+const BLOCKLIST_FIELD = 'blocklist';
 
 export interface RuleConfig {
   presence: PresenceConfig;
@@ -113,8 +113,8 @@ export type RunResult =
       runId: string;
       applying: boolean;
       stats: Partial<RunStats>;
-      /** contacts the deceased rule blacklisted that are no longer marked
-       *  deceased but still blacklisted, for a person to decide on */
+      /** contacts the deceased rule blocklisted that are no longer marked
+       *  deceased but still blocklisted, for a person to decide on */
       review: number[];
       error?: string;
     };
@@ -286,7 +286,7 @@ async function execute(
       data: deceased.writes.map((contactId) => ({
         runId: run.id,
         contactId,
-        field: BLACKLIST_FIELD,
+        field: BLOCKLIST_FIELD,
         valueBefore: 'false',
         valueAfter: 'true',
         triggerContactId: contactId,
@@ -537,7 +537,7 @@ function stillNeeded(
       )
         ? null
         : 'no longer needs re-marking';
-    case BLACKLIST_FIELD:
+    case BLOCKLIST_FIELD:
       if (!config.deceased) return 'the deceased rule is off';
       if (deceasedStateOf(current, config.deceased) !== 'deceased')
         return 'no longer marked deceased';
@@ -561,8 +561,8 @@ function changeOf(write: Write): {
         before: { presenceSource: write.valueBefore },
         after: { presenceSource: write.valueAfter },
       };
-    case BLACKLIST_FIELD:
-      return { before: { blackList: false }, after: { blackList: true } };
+    case BLOCKLIST_FIELD:
+      return { before: { blocklisted: false }, after: { blocklisted: true } };
     default:
       return {
         before: { presence: null },
@@ -591,7 +591,7 @@ function upsertOf(
           },
         ],
       };
-    case BLACKLIST_FIELD:
+    case BLOCKLIST_FIELD:
       return { black_list: true };
     default:
       return {
@@ -637,7 +637,7 @@ async function settleVerified(
     where: { id: write.id },
     data: { status: 'VERIFIED', detail, writtenPresenceDate: seen.date },
   });
-  if (write.field === BLACKLIST_FIELD) {
+  if (write.field === BLOCKLIST_FIELD) {
     await prisma.handledDeceased.upsert({
       where: { spaceKey_contactId: { spaceKey, contactId: write.contactId } },
       create: {
@@ -697,7 +697,7 @@ async function finish(
 
 /** Slack hears about a run only when something went wrong (a write failed,
  *  or the run failed or tripped) or a person must decide something (a
- *  contact the job blacklisted is no longer marked deceased). Other runs,
+ *  contact the job blocklisted is no longer marked deceased). Other runs,
  *  and runs stopped on purpose, send nothing; the health check catches a
  *  run that stops reporting altogether. */
 async function report(
@@ -885,7 +885,7 @@ async function loadHandled(
   return new Map(rows.map((r) => [r.contactId, r.handling]));
 }
 
-/** Contacts found already blacklisted become handled; contacts no longer
+/** Contacts found already blocklisted become handled; contacts no longer
  *  marked are forgotten, so marking them again acts again. */
 async function recordHandled(
   prisma: PrismaClient,
@@ -966,7 +966,7 @@ function readBack(
       return isMarked(contact, presence)
         ? { state: 'pending' }
         : { state: 'markerChanged' };
-    case BLACKLIST_FIELD:
+    case BLOCKLIST_FIELD:
       return contact.black_list === true
         ? { state: 'verified', date: null }
         : { state: 'pending' };

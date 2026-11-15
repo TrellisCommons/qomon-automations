@@ -66,7 +66,7 @@ Edge cases:
 - **One search per run, filtered in code.** Search returns each contact's Presence inline, and its `eql` is a token match, so the job fetches the whole space and applies the municipality filter itself. A contact whose city is blank is in scope.
 - **The earliest canvassed Presence at an address is the trigger.** Its id is on every planned write. Qomon cannot set a Presence date, so the written date is when the write landed.
 - **Re-read before each write.** Presence is one value per contact and an upsert replaces it, so a visit recorded between the fetch and the write would be overwritten. Each contact is re-read just before its upsert, and each of its changes is dropped if it no longer applies: a household value if the contact now has a Presence or its address key changed, a "Do not contact" if the contact is no longer marked deceased or is already "Do not contact". This narrows the race to a few seconds; Qomon has no conditional write to close it.
-- **"Do not contact" is only turned on.** An upsert cannot turn it off, and whether a contact is alive is a person's call. When the mark is removed from a contact the job blacklisted and it is still "Do not contact", Slack lists it once.
+- **"Do not contact" is only turned on.** An upsert cannot turn it off, and whether a contact is alive is a person's call. When the mark is removed from a contact the job blocklisted and it is still "Do not contact", Slack lists it once.
 - **Deceased state is recorded on dry runs too.** Adding `FOUND` contacts and forgetting unmarked ones records what Qomon shows, not a change to Qomon, so it happens on every run. Otherwise a space with writes off would miss the unmarking it needs to act again later.
 - **Verify every write.** Upsert answers 202 before doing anything. Writes go in batches of 20 contacts; each batch is read back every 3 seconds until every write shows (a household value with its marker, recording its Presence date; a re-mark; "Do not contact" on), shows something else (failed), or `VERIFY_TIMEOUT_SECONDS` passes (failed).
 - **Change log before the upsert.** Each write's `ChangeLogEntry` (for a household value, before: no Presence, after: the value and the trigger; for "Do not contact", before: off, after: on) is committed before the upsert is sent, so the audit trail never misses a write that reached Qomon. A write that then fails is marked `FAILED` on its `PlannedWrite`. The change-log table is append-only (a database trigger).
@@ -92,7 +92,7 @@ A write reaches Qomon only when `QOMON_WRITES_ALLOWED=true` (the droplet only), 
 |---|---|
 | `space` | config, the encrypted Qomon API key (AES-256-GCM with `SPACE_SECRET_KEY`), `writesEnabled`, `activeUntil` |
 | `job_run` | one row per run: kind (hourly or backfill), whether it applied, status, counts |
-| `planned_write` | one row per planned change: Qomon contact id, field (`presence`, `presence_source`, `black_list`), trigger contact id, value, reason, outcome |
+| `planned_write` | one row per planned change: Qomon contact id, field (`presence`, `presence_source`, `blocklist`), trigger contact id, value, reason, outcome |
 | `handled_deceased` | deceased contacts the rule has dealt with: Qomon contact id, `WRITTEN` or `FOUND`, the run |
 | `change_log_entry` | append-only audit trail of every change to Qomon or to a space |
 

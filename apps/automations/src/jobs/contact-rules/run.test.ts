@@ -698,8 +698,8 @@ describe('deceased rule', () => {
       where: { subjectId: String(ids.neighbour) },
     });
     expect(entry).toMatchObject({
-      before: { blackList: false },
-      after: { blackList: true },
+      before: { blocklisted: false },
+      after: { blocklisted: true },
     });
   });
 
@@ -770,7 +770,7 @@ describe('deceased rule', () => {
     });
   });
 
-  it('asks a person to decide when a contact it blacklisted is no longer marked', async () => {
+  it('asks a person to decide when a contact it blocklisted is no longer marked', async () => {
     await makeSpace(prisma, withDeceased);
     await setContact(ids.neighbour, { custom_fields: MARKED_DECEASED });
     await runContactRules(deps(), hourly);

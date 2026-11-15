@@ -88,7 +88,7 @@ describe('planDeceased', () => {
     expect(plan.stats).toMatchObject({ deceased: 1, deceasedPlanned: 1 });
   });
 
-  it('records a marked contact already blacklisted as handled, writing nothing', () => {
+  it('records a marked contact already blocklisted as handled, writing nothing', () => {
     const marked = contact(['yes'], true);
     const plan = planDeceased([marked], config, new Map());
     expect(plan.writes).toEqual([]);
@@ -117,7 +117,7 @@ describe('planDeceased', () => {
     expect(plan.review).toEqual([]);
   });
 
-  it('asks for review when a contact the job blacklisted is no longer marked but still blacklisted', () => {
+  it('asks for review when a contact the job blocklisted is no longer marked but still blocklisted', () => {
     const written = contact(['no'], true);
     const found = contact([], true);
     const overridden = contact([], false);

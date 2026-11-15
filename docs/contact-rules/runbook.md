@@ -51,7 +51,7 @@ The first run catches up on every address knocked so far and, with the deceased 
    ```
 
    The output line has the counts. Household match: `fetched`, `outsideMunicipality`, `unkeyable`, `households`, `canvassedHouseholds`, `alreadyHavePresence`, `planned`, and `remarks`. Deceased: `deceased`, `deceasedPlanned` ("Do not contact" to turn on), `deceasedAmbiguous`, and `deceasedOtherValue` (contacts holding only another option, such as "NOT deceased", to clean up by hand).
-2. **Check a sample** of planned contacts in Qomon. A `presence` row should share an address with its `trigger_contact_id` and have no Presence; compare against the Google Sheet's List 1 (counts will differ: the job covers every contact, not only voters). A `black_list` row should be marked deceased and not yet "Do not contact". Compare `deceased` with a Qomon list filtered on the deceased field.
+2. **Check a sample** of planned contacts in Qomon. A `presence` row should share an address with its `trigger_contact_id` and have no Presence; compare against the Google Sheet's List 1 (counts will differ: the job covers every contact, not only voters). A `blocklist` row should be marked deceased and not yet "Do not contact". Compare `deceased` with a Qomon list filtered on the deceased field.
 3. **Turn writes on** for the space, saying why:
 
    ```bash

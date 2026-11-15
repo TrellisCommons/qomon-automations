@@ -240,7 +240,7 @@ export function runQomonContractSuite(
 
     it('upsert turns "Do not contact" on but not off', async () => {
       const h = await setup();
-      const id = await h.makeContact({ surname: disposableName('BlackList') });
+      const id = await h.makeContact({ surname: disposableName('Blocklist') });
       await h.api.upsertContact({ id, black_list: true });
       await h.eventually(async () => {
         const c = await h.api.getContact(id);

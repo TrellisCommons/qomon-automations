@@ -24,7 +24,7 @@ function gitRootAbove(path: string): string | null {
 }
 
 /** A run's planned writes as CSV: Qomon contact ids, the field each write
- *  changes (`presence`, `presence_source`, or `black_list`), the triggering
+ *  changes (`presence`, `presence_source`, or `blocklist`), the triggering
  *  contact, and each write's outcome. For checking a dry run. */
 export async function writeRunReport(
   prisma: PrismaClient,
