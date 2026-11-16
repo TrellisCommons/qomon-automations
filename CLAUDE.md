@@ -56,7 +56,8 @@ Tests need Postgres at `DATABASE_URL`; the test setup runs `prisma migrate deplo
 ## Cloud sessions
 
 - Docker does not work. Never run `docker` or `docker compose`; Docker builds are verified in CI or on a laptop.
-- The image's Postgres 16 cluster is the test database. A SessionStart hook (`.claude/hooks/start-postgres.sh`) starts it.
+- Start sessions in the **qomon-automations** cloud environment: it sets `DATABASE_URL` and the Qomon variables, and allows Qomon's hosts.
+- The image's Postgres 16 cluster is the test database. A SessionStart hook (`.claude/hooks/start-postgres.sh`) starts it and creates the role and database, so tests work in any environment; in another one it says so and sets `DATABASE_URL`.
 - The environment's Setup Script is versioned in `claude/cloud-environment-setup.sh`. It logs failed steps to `~/.cloud-setup-errors.log`; check that file at session start.
 
 ## Docs are shared memory
