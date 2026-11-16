@@ -1,6 +1,8 @@
 # qomon-automations
 
-Scheduled jobs that read and write a campaign's Qomon space. The first job is the household match: when a canvasser records a Presence on one contact, every other contact at that address gets "Absent (household)". The plan is [issue #1](https://github.com/TrellisCommons/qomon-automations/issues/1).
+Scheduled jobs that read and write a campaign's Qomon space. The contact rules job applies two rules from one fetch:
+- **Household match**: when a canvasser records a Presence on one contact, every other contact at that address gets Presence "absent", marked "Household match" in the "Presence source" custom field. The plan is [issue #1](https://github.com/TrellisCommons/qomon-automations/issues/1).
+- **Deceased**: a contact marked deceased gets Qomon's "Do not contact".
 
 ## This repo is public
 

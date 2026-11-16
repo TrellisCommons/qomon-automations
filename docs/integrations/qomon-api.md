@@ -28,7 +28,18 @@ As of 2026-10-11 (University—Rosedale test space; the contract suite's marker 
 - Search returns `custom_fields` inline, a few seconds behind the write. `custom_fields ext` is a valid search condition.
 - An unknown value for a custom field drops the whole record, Presence included.
 - Writing Presence again leaves a custom field as it was.
-- An upsert cannot clear a custom field: `value: ""` and `value: null` get 400 "advanced field entries require value", and `custom_fields: []` or `null` is accepted and changes nothing. Writing another value replaces it.
+- An upsert cannot clear a custom field (as of 2026-11-11, demo space): `value: ""`, `value: null`, or no `value` get 400 "advanced field entries require value"; `custom_fields: []` or `null`, and entries carrying `remove`, `delete`, or `deleted`, are accepted and change nothing. Writing another value replaces it.
+- `PATCH /contacts/{id}` clears a custom field left out of its body (as of 2026-11-11, demo space), and keeps a Presence date that is sent back with it. It is a full replace: every field must be sent, every answer gets a new id, and anything written between the read and the PATCH is lost. The jobs never use it.
+- Search with `attr: 'form'` and a custom field's id matches nothing; `custom_fields ext` with the field's `form_id` works, and `custom_fields any_of` gets a 422 (as of 2026-11-11, PSM space).
+
+## Do not contact
+
+As of 2026-11-11 (PSM space and demo space; the contract suite re-checks the upsert behaviour):
+
+- Qomon's "Do not contact again" button on a contact is the contact field `black_list`. With it on, Qomon blocks email, calls, and door knocks to the contact. The contact still shows in contact search and in the count while an action is being built, but is left out of the action once created.
+- `GET /contacts/{id}` and search return `black_list: true` inline when it is on.
+- An upsert with `black_list: true` turns it on. An upsert with `black_list: false` is accepted (202) and leaves it on; only `PATCH` turns it off.
+- `black_list` as a search condition returned 502 on `/kpi` every time it was tried.
 
 ## Upsert
 
@@ -36,6 +47,8 @@ As of 2026-10-11 (University—Rosedale test space; the contract suite's marker 
 - A record naming an unknown form, value, or field is dropped whole, valid fields included, with no error.
 - An upsert by an `id` that does not exist was dropped, not turned into a new contact.
 - Without an `id`, Qomon matches on email and name, or name and address, and may update a different contact. The client refuses an upsert without an id.
+- Every upsert gives every form and custom field answer on the contact a new id, even answers it does not name (as of 2026-11-11, demo space). Saving a contact in Qomon's UI does the same.
+- Four upserts to one contact within about a second left it with two Presence answers and two answers on a single-choice custom field, until a later upsert rewrote them (as of 2026-11-11, demo space). Send at most one upsert per contact at a time.
 
 ## Search
 

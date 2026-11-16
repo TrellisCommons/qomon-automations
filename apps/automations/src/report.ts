@@ -2,6 +2,10 @@ import { existsSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { dirname, resolve, sep } from 'node:path';
 import type { PrismaClient } from './generated/prisma/index.js';
+import {
+  describePlanned,
+  type PlannedCounts,
+} from './jobs/contact-rules/counts.js';
 
 export class ReportInsideRepoError extends Error {
   constructor(path: string) {
@@ -23,8 +27,9 @@ function gitRootAbove(path: string): string | null {
   }
 }
 
-/** A run's planned writes as CSV: Qomon contact ids, the triggering contact,
- *  and each write's outcome. For checking a dry run against the sheet. */
+/** A run's planned writes as CSV: Qomon contact ids, the field each write
+ *  changes (`presence`, `presence_source`, or `blocklist`), the triggering
+ *  contact, and each write's outcome. For checking a dry run. */
 export async function writeRunReport(
   prisma: PrismaClient,
   runId: string,
@@ -38,9 +43,16 @@ export async function writeRunReport(
     orderBy: { contactId: 'asc' },
   });
   const rows = [
-    'contact_id,trigger_contact_id,value_after,status,detail',
+    'contact_id,field,trigger_contact_id,value_after,status,detail',
     ...writes.map((w) =>
-      [w.contactId, w.triggerContactId, w.valueAfter, w.status, w.detail ?? '']
+      [
+        w.contactId,
+        w.field,
+        w.triggerContactId,
+        w.valueAfter,
+        w.status,
+        w.detail ?? '',
+      ]
         .map((v) =>
           /[",\n]/.test(String(v))
             ? `"${String(v).replace(/"/g, '""')}"`
@@ -53,8 +65,7 @@ export async function writeRunReport(
   return writes.length;
 }
 
-interface StoredStats {
-  planned?: number;
+interface StoredStats extends PlannedCounts {
   applied?: number;
   verified?: number;
   failed?: number;
@@ -87,7 +98,7 @@ export async function runStatus(
       const p = s.progress;
       const lines = [
         `${run.id}  ${run.kind.toLowerCase()}  ${run.status}  ${run.applying ? 'applying' : 'dry run'}  started ${run.startedAt.toISOString()}${run.finishedAt ? `  finished ${run.finishedAt.toISOString()}` : ''}`,
-        `  planned ${s.planned ?? '?'}  applied ${s.applied ?? 0}  verified ${s.verified ?? 0}  failed ${s.failed ?? 0}  skipped ${s.skipped ?? 0}`,
+        `  planned ${describePlanned(s)}  applied ${s.applied ?? 0}  verified ${s.verified ?? 0}  failed ${s.failed ?? 0}  skipped ${s.skipped ?? 0}`,
       ];
       if (p) {
         const pct = p.total ? Math.floor((p.done / p.total) * 100) : 100;
@@ -103,4 +114,23 @@ export async function runStatus(
       return lines.join('\n');
     })
     .join('\n');
+}
+
+/** Contacts the deceased rule blocklisted that are no longer marked deceased
+ *  and still "Do not contact": each needs a person to decide. */
+export async function reviewList(
+  prisma: PrismaClient,
+  spaceKey: string,
+): Promise<string> {
+  const rows = await prisma.handledDeceased.findMany({
+    where: { spaceKey, handling: 'REVIEW' },
+    select: { contactId: true },
+    orderBy: { contactId: 'asc' },
+  });
+  if (rows.length === 0)
+    return `no contacts awaiting review on space ${spaceKey}`;
+  return [
+    `${rows.length} contact${rows.length === 1 ? '' : 's'} no longer marked deceased but still "Do not contact":`,
+    ...rows.map((r) => String(r.contactId)),
+  ].join('\n');
 }

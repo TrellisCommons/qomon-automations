@@ -1,6 +1,7 @@
 import type { Env } from '../env.js';
 
-/** One message to the run-alerts channel. Counts and run ids only. */
+/** One message to the run-alerts channel: counts, run ids, and up to 20
+ *  Qomon contact ids awaiting a decision. Never names or addresses. */
 export async function postSlack(
   env: Env,
   text: string,
