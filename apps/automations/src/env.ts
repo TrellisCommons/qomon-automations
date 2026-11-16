@@ -5,41 +5,54 @@ const booleanFlag = z
   .default('false')
   .transform((v) => v === 'true');
 
-const EnvSchema = z.object({
-  NODE_ENV: z
-    .enum(['development', 'test', 'production'])
-    .default('development'),
-  DATABASE_URL: z.string().url(),
-  QOMON_API_BASE: z.string().url().default('https://incoming.qomon.app'),
-  /** Requests per second to Qomon. Its limit is a burst of 100 refilling at
-   *  10 per second (as of 2026-10), so stay under 10. */
-  QOMON_RPS: z.coerce.number().positive().max(9).default(5),
-  /** The hard stop on Qomon writes. Set to `true` on the droplet only, so a
-   *  database copied from production cannot write from anywhere else. */
-  QOMON_WRITES_ALLOWED: booleanFlag,
-  /** Circuit breaker: an hourly run that plans more writes than this writes
-   *  nothing and turns the space's writes off. */
-  MAX_WRITES_PER_RUN: z.coerce.number().int().positive().default(500),
-  /** Circuit breaker: once at least MIN_WRITES_FOR_FAILED_SHARE writes have
-   *  been attempted, a larger share than this failing verification stops the
-   *  run and turns the space's writes off. */
-  MAX_FAILED_SHARE: z.coerce.number().min(0).max(1).default(0.2),
-  MIN_WRITES_FOR_FAILED_SHARE: z.coerce.number().int().positive().default(10),
-  /** How long a write may take to show up in Qomon before it counts as
-   *  failed. Upserts are asynchronous and usually visible in seconds. */
-  VERIFY_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(120),
-  /** 32 bytes, base64. Encrypts each space's Qomon API key at rest. */
-  SPACE_SECRET_KEY: z
-    .string()
-    .refine(
-      (v) => Buffer.from(v, 'base64').length === 32,
-      'must be 32 bytes, base64-encoded',
-    )
-    .optional(),
-  SLACK_BOT_TOKEN: z.string().optional(),
-  SLACK_CHANNEL: z.string().optional(),
-  HEALTHCHECK_URL: z.string().url().optional(),
-});
+const EnvSchema = z
+  .object({
+    NODE_ENV: z
+      .enum(['development', 'test', 'production'])
+      .default('development'),
+    DATABASE_URL: z.string().url(),
+    QOMON_API_BASE: z.string().url().default('https://incoming.qomon.app'),
+    /** Requests per second to Qomon. Its limit is a burst of 100 refilling at
+     *  10 per second (as of 2026-10), so stay under 10. */
+    QOMON_RPS: z.coerce.number().positive().max(9).default(5),
+    /** The hard stop on Qomon writes. Set to `true` on the droplet only, so a
+     *  database copied from production cannot write from anywhere else. */
+    QOMON_WRITES_ALLOWED: booleanFlag,
+    /** Circuit breaker: an hourly run that plans more writes than this writes
+     *  nothing and turns the space's writes off. */
+    MAX_WRITES_PER_RUN: z.coerce.number().int().positive().default(500),
+    /** Circuit breaker: once at least MIN_WRITES_FOR_FAILED_SHARE writes have
+     *  been attempted, a larger share than this failing verification stops the
+     *  run and turns the space's writes off. */
+    MAX_FAILED_SHARE: z.coerce.number().min(0).max(1).default(0.2),
+    MIN_WRITES_FOR_FAILED_SHARE: z.coerce.number().int().positive().default(10),
+    /** How long a write may take to show up in Qomon before it counts as
+     *  failed. Upserts are asynchronous and usually visible in seconds. */
+    VERIFY_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(120),
+    /** 32 bytes, base64. Encrypts each space's Qomon API key at rest. */
+    SPACE_SECRET_KEY: z
+      .string()
+      .refine(
+        (v) => Buffer.from(v, 'base64').length === 32,
+        'must be 32 bytes, base64-encoded',
+      )
+      .optional(),
+    /** Required where writes are allowed: Slack carries breaker alerts and the
+     *  contacts waiting on a person's decision. */
+    SLACK_BOT_TOKEN: z.string().optional(),
+    SLACK_CHANNEL: z.string().optional(),
+    HEALTHCHECK_URL: z.string().url().optional(),
+  })
+  .superRefine((env, ctx) => {
+    if (!env.QOMON_WRITES_ALLOWED) return;
+    for (const name of ['SLACK_BOT_TOKEN', 'SLACK_CHANNEL'] as const)
+      if (!env[name])
+        ctx.addIssue({
+          code: 'custom',
+          path: [name],
+          message: 'required when QOMON_WRITES_ALLOWED is true',
+        });
+  });
 
 export type Env = z.infer<typeof EnvSchema>;
 

@@ -39,3 +39,8 @@ export async function tryAdvisoryLock(
     },
   };
 }
+
+/** The lock a contact-rules run holds on its space for the whole run. */
+export function spaceLockName(spaceKey: string): string {
+  return `contact-rules:${spaceKey}`;
+}

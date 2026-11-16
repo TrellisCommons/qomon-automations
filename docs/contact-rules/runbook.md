@@ -29,7 +29,7 @@ Locally, `pnpm build` then `pnpm job <command>` with a `.env` (see `.env.example
    unset QOMON_KEY
    ```
 
-   The canvassed values are the form's **stored** values, which can differ from its labels. The household value (`absent`) and the marker (`Presence source` = `household_match`, re-marked `recanvassed`) are the defaults; `--household-value`, `--marker-field`, `--marker-value`, and `--recanvassed-value` change them. A new space starts with writes off. Run `space:add` again (without stdin) to change settings; the key is kept.
+   The canvassed values are the form's **stored** values, which can differ from its labels. The household value (`absent`) and the marker (`Presence source` = `household_match`, re-marked `recanvassed`) are the defaults; `--household-value`, `--marker-field`, `--marker-value`, and `--recanvassed-value` change them. A new space starts with writes off. Run `space:add` again (without stdin) to change settings; the key is kept. It is refused while a run on the space is in progress.
 3. **Turn on the deceased rule**, if the space marks deceased contacts. The space needs a custom field (checkbox or single choice) with a deceased option, and nothing else should be ticked with it: a contact with both "deceased" and another option is left alone and counted as `deceasedAmbiguous`.
 
    ```bash
@@ -90,7 +90,7 @@ journalctl -u 'qomon-contact-rules@*' --since today
 
 `/etc/qomon-automations/compose.env` holds `POSTGRES_PASSWORD` for Compose; `/etc/qomon-automations/.env` holds the job's environment, with `QOMON_WRITES_ALLOWED=true`. Both are root-only.
 
-Each run posts to Slack only when something went wrong (a write failed, the run failed, or a breaker tripped) or a person must decide something. Successful runs post nothing; check them with `job status`. It pings `HEALTHCHECK_URL` at the end (`/fail` on failure), so a dead timer shows up as a missed ping.
+Each run posts to Slack only when something went wrong (a write failed, the run failed, or a breaker tripped) or a person must decide something. Successful runs post nothing; check them with `job status`. It pings `HEALTHCHECK_URL` at the end (`/fail` on failure), so a dead timer shows up as a missed ping. The droplet's `.env` must set `SLACK_BOT_TOKEN` and `SLACK_CHANNEL`: with `QOMON_WRITES_ALLOWED=true` every command refuses to start without them.
 
 | Exit | Meaning |
 |---|---|
@@ -108,7 +108,7 @@ Each run posts to Slack only when something went wrong (a write failed, the run 
 
 ## When Slack lists contacts no longer marked deceased
 
-The deceased rule turned "Do not contact" on for these contacts, and someone has since removed the deceased mark without turning "Do not contact" off. The job never turns it off. For each contact, decide in Qomon: turn "Do not contact" off if the person is alive and may be contacted, or leave it. A contact is listed on each run until a post succeeds, so a failed post is retried on the next run.
+The deceased rule turned "Do not contact" on for these contacts, and someone has since removed the deceased mark without turning "Do not contact" off. The job never turns it off. The message lists up to 20 contact ids; above that it gives only the count. `job review --space <space-key>` lists every contact still waiting. For each contact, decide in Qomon: turn "Do not contact" off if the person is alive and may be contacted, or leave it. A contact leaves the list once "Do not contact" is off or it is marked deceased again. A failed post is retried on the next run.
 
 ## After the election
 

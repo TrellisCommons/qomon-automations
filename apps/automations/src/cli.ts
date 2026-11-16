@@ -11,7 +11,7 @@ import {
 import { tryAdvisoryLock } from './lock.js';
 import { createLogger } from './log.js';
 import { pingHealthcheck, postSlack } from './notify/slack.js';
-import { runStatus, writeRunReport } from './report.js';
+import { reviewList, runStatus, writeRunReport } from './report.js';
 import {
   getSpace,
   qomonFor,
@@ -30,6 +30,8 @@ const USAGE = `Usage: pnpm job <command> [options]
 
   status --space <key> [--run <id>]      Recent runs, with progress and ETA while one is applying
   report --run <id> --out <file.csv>     A run's planned writes (contact ids only)
+  review --space <key>                   Contacts the deceased rule blocklisted that are
+                                         no longer marked deceased, awaiting a decision
   space:add --key <key> --name <name> --canvassed <v1,v2,...>
             [--household-value <v>] [--marker-field <label>] [--marker-value <v>]
             [--recanvassed-value <v>]
@@ -136,6 +138,12 @@ async function main(argv: string[]): Promise<number> {
             required(values.space, '--space'),
             values.run,
           ),
+        );
+        return 0;
+      }
+      case 'review': {
+        console.log(
+          await reviewList(prisma, required(values.space, '--space')),
         );
         return 0;
       }

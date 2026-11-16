@@ -115,3 +115,22 @@ export async function runStatus(
     })
     .join('\n');
 }
+
+/** Contacts the deceased rule blocklisted that are no longer marked deceased
+ *  and still "Do not contact": each needs a person to decide. */
+export async function reviewList(
+  prisma: PrismaClient,
+  spaceKey: string,
+): Promise<string> {
+  const rows = await prisma.handledDeceased.findMany({
+    where: { spaceKey, handling: 'REVIEW' },
+    select: { contactId: true },
+    orderBy: { contactId: 'asc' },
+  });
+  if (rows.length === 0)
+    return `no contacts awaiting review on space ${spaceKey}`;
+  return [
+    `${rows.length} contact${rows.length === 1 ? '' : 's'} no longer marked deceased but still "Do not contact":`,
+    ...rows.map((r) => String(r.contactId)),
+  ].join('\n');
+}

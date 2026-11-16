@@ -2,6 +2,7 @@ import { QomonClient, type QomonApi } from '@trellis/qomon-client';
 import { withChangeLog } from '../changelog/write.js';
 import { decryptSecret, encryptSecret } from '../crypto.js';
 import type { Env } from '../env.js';
+import { spaceLockName } from '../lock.js';
 import type { PrismaClient, Space } from '../generated/prisma/index.js';
 
 export class SpaceNotFoundError extends Error {
@@ -10,6 +11,15 @@ export class SpaceNotFoundError extends Error {
       `no space with key ${JSON.stringify(key)}; add it with \`space:add\``,
     );
     this.name = 'SpaceNotFoundError';
+  }
+}
+
+export class SpaceLockedError extends Error {
+  constructor(key: string) {
+    super(
+      `a contact-rules run on space ${key} is in progress; change the space after it finishes`,
+    );
+    this.name = 'SpaceLockedError';
   }
 }
 
@@ -74,6 +84,11 @@ export async function saveSpace(
     prisma,
     { actor, reason: `configure space ${config.key}` },
     async (ctx) => {
+      // A run plans and records handled contacts under the config it read at
+      // start; changing it mid-run would leave rows for the old config.
+      const [{ locked }] = await ctx.tx.$queryRaw<[{ locked: boolean }]>`
+        SELECT pg_try_advisory_xact_lock(hashtext(${spaceLockName(config.key)})) AS locked`;
+      if (!locked) throw new SpaceLockedError(config.key);
       const before = await ctx.tx.space.findUnique({
         where: { key: config.key },
       });

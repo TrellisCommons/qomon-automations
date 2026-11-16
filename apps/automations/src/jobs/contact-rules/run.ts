@@ -14,7 +14,7 @@ import type {
   RunStatus,
   Space,
 } from '../../generated/prisma/index.js';
-import type { HeldLock } from '../../lock.js';
+import { spaceLockName, type HeldLock } from '../../lock.js';
 import type { Logger } from '../../log.js';
 import { resolveWriteMode } from '../../qomon/write-mode.js';
 import { getSpace, setWritesEnabled } from '../../spaces/spaces.js';
@@ -45,7 +45,7 @@ import {
 } from './presence.js';
 
 export const JOB = 'contact-rules';
-/** contact ids listed in one Slack message */
+/** above this many, the Slack message points to `job review` instead of listing ids */
 const REVIEW_SHOWN = 20;
 const ACTOR = 'contact-rules';
 /** contacts per batch; each gets one upsert carrying all of its changes */
@@ -156,7 +156,7 @@ export async function runContactRules(
     );
   }
 
-  const lock = await deps.lock(`${JOB}:${space.key}`);
+  const lock = await deps.lock(spaceLockName(space.key));
   if (!lock) {
     log.warn('another run holds the lock; exiting');
     return { status: 'locked' };
@@ -767,9 +767,9 @@ async function report(
       ]
     : [];
   if (result.review.length > 0) {
-    const shown = result.review.slice(0, REVIEW_SHOWN);
+    const n = result.review.length;
     lines.push(
-      `:eyes: ${result.review.length} contact${result.review.length === 1 ? ' is' : 's are'} no longer marked deceased but still "Do not contact", which this job turned on. Decide whether to turn it off: ${shown.join(', ')}${result.review.length > shown.length ? ` and ${result.review.length - shown.length} more` : ''}`,
+      `:eyes: ${n} contact${n === 1 ? ' is' : 's are'} no longer marked deceased but still "Do not contact", which this job turned on. Decide whether to turn it off: ${n <= REVIEW_SHOWN ? result.review.join(', ') : `list them with \`job review --space ${space.key}\``}`,
     );
   }
   lines.push(`space \`${space.key}\` · run \`${result.runId}\``);
