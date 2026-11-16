@@ -920,6 +920,49 @@ describe('deceased rule', () => {
     expect(d.notify).toHaveBeenCalledOnce();
   });
 
+  async function unmarkManyAfterBlocklisting(n: number): Promise<number[]> {
+    const marked = Array.from(
+      { length: n },
+      (_, i) =>
+        qomon.seedContact({
+          firstname: `Dee${i}`,
+          address: { housenumber: String(500 + i), street: 'Example St' },
+          custom_fields: MARKED_DECEASED,
+        }).id!,
+    );
+    await runContactRules(deps(), hourly);
+    for (const id of marked) await setContact(id, { custom_fields: [] });
+    return marked;
+  }
+
+  it('lists every contact id when up to 20 need review', async () => {
+    await makeSpace(prisma, withDeceased);
+    const marked = await unmarkManyAfterBlocklisting(20);
+
+    const d = deps();
+    await runContactRules(d, hourly);
+    const text = d.notify.mock.calls[0]![0] as string;
+    for (const id of marked) expect(text).toMatch(new RegExp(`\\b${id}\\b`));
+    expect(
+      await prisma.handledDeceased.count({
+        where: { handling: 'REVIEW', reviewNotifiedAt: { not: null } },
+      }),
+    ).toBe(20);
+  });
+
+  it('lists no contact ids when more than 20 need review, and points to job review', async () => {
+    await makeSpace(prisma, withDeceased);
+    const marked = await unmarkManyAfterBlocklisting(21);
+
+    const d = deps();
+    await runContactRules(d, hourly);
+    const text = d.notify.mock.calls[0]![0] as string;
+    expect(text).toMatch(/21 contacts/);
+    expect(text).toMatch(/job review --space test-space/);
+    for (const id of marked)
+      expect(text).not.toMatch(new RegExp(`\\b${id}\\b`));
+  });
+
   it('treats a "Do not contact" write that lands after verification gave up as its own', async () => {
     await makeSpace(prisma, withDeceased);
     await setContact(ids.neighbour, { custom_fields: MARKED_DECEASED });

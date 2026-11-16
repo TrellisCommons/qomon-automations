@@ -2,7 +2,12 @@ import { mkdtempSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
-import { ReportInsideRepoError, runStatus, writeRunReport } from './report.js';
+import {
+  ReportInsideRepoError,
+  reviewList,
+  runStatus,
+  writeRunReport,
+} from './report.js';
 import { makeSpace, resetDb, testPrisma } from './test/db.js';
 
 const prisma = testPrisma();
@@ -83,5 +88,44 @@ describe('run status', () => {
     const text = await runStatus(prisma, 'test-space', first.id);
     expect(text).toContain(first.id);
     expect(text).not.toContain(second.id);
+  });
+});
+
+describe('review list', () => {
+  it('lists the contacts awaiting a decision, whether or not Slack listed them', async () => {
+    const run = await makeRun();
+    const row = (
+      contactId: number,
+      handling: 'REVIEW' | 'WRITTEN',
+      notified: boolean,
+    ) => ({
+      spaceKey: run.spaceKey,
+      contactId,
+      handling,
+      runId: run.id,
+      reviewNotifiedAt: notified ? new Date('2026-10-10T12:00:00Z') : null,
+    });
+    await prisma.handledDeceased.createMany({
+      data: [
+        row(3, 'REVIEW', true),
+        row(1, 'REVIEW', false),
+        row(2, 'WRITTEN', false),
+      ],
+    });
+
+    expect(await reviewList(prisma, run.spaceKey)).toBe(
+      [
+        '2 contacts no longer marked deceased but still "Do not contact":',
+        '1',
+        '3',
+      ].join('\n'),
+    );
+  });
+
+  it('says so when none are waiting', async () => {
+    await makeSpace(prisma);
+    expect(await reviewList(prisma, 'test-space')).toBe(
+      'no contacts awaiting review on space test-space',
+    );
   });
 });
