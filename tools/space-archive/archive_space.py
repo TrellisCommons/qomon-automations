@@ -20,7 +20,7 @@ Resumable: a rerun skips finished endpoints, and per-id endpoints continue from 
 The API key is read from stdin, and the archive folder must be outside any git work tree:
     printf %s "$QOMON_API_KEY" | uv run --with requests python archive_space.py ~/qomon-archive --stages contacts
 
-The metabase stage reads comma-separated embed tokens from QOMON_METABASE_TOKENS.
+The metabase stage reads comma-separated embed tokens from QOMON_METABASE_TOKENS and fetches tokens for each --dashboard-id.
 --seal writes HASHES.sha256 over every file; run it last, since any later change breaks the restore.
 """
 
@@ -130,6 +130,28 @@ LISTS = [
     ("transaction_export_settings", INTERNAL, "/exports/transactions/settings", "none"),
     ("telnyx_profiles", INTERNAL, "/telnyx/messagingprofiles", "none"),
     ("mandate_settings", INTERNAL, "/mandates/settings", "none"),
+    ("affectations", INTERNAL, "/affectations", "none"),
+    ("categories_actions", INTERNAL, "/categories/actions", "none"),
+    ("cross_analyses", INTERNAL, "/cross-analyses", "none"),
+    ("export_templates", INTERNAL, "/export-templates", "none"),
+    ("online_actions", INTERNAL, "/online-actions", "none"),
+    ("online_donations", INTERNAL, "/online-donations", "none"),
+    ("membership_global_infos", INTERNAL, "/membership_global_infos", "none"),
+    ("roles_grantable", INTERNAL, "/roles/grantable", "none"),
+    ("stripe_accounts", INTERNAL, "/stripe/accounts", "none"),
+    ("billing_plans", INTERNAL, "/billing/subscription/plan/available", "none"),
+    ("topics_tags", INTERNAL, "/topics-tags", "none"),
+    ("user_kpi", INTERNAL, "/userkpi", "none"),
+    ("age_categories", INTERNAL, "/getagecategories", "none"),
+    ("notification_settings", INTERNAL, "/notification-settings", "none"),
+    ("teams_public", INCOMING, "/teams/public", "none"),
+    ("emailer_account", INTERNAL, "/emailer/account", "none"),
+    ("email_credit_balance", INTERNAL, "/getbalanceemail", "none"),
+    ("sms_usage", INTERNAL, "/getusagesmsdb", "none"),
+    ("sms_credit_balance", INTERNAL, "/getbalancemessagebird", "none"),
+    ("memberships_kpi", INCOMING, "/v1/memberships/kpi", "none"),
+    ("membership_prices", INCOMING, "/v1/membership_prices", "none"),
+    ("membership_price_groups", INCOMING, "/v1/membership_price_groups", "none"),
     ("donations", INCOMING, "/v1/donations", "limit_offset"),
     ("transactions", INCOMING, "/v1/transactions", "limit_offset"),
     ("transaction_bundles", INCOMING, "/v1/transaction_bundles", "limit_offset"),
@@ -154,11 +176,24 @@ DETAILS = [
     ("emailer_template", "emailer_templates", INTERNAL, "/emailer/template/{id}"),
     ("workflow", "workflows", INTERNAL, "/workflows/{id}"),
     ("workflow_runs", "workflows", INTERNAL, "/workflows/{id}/runs"),
+    ("action_participants", "actions", INTERNAL, "/action/{id}/participants"),
+    ("action_facts", "actions", INTERNAL, "/actions/{id}/facts"),
+    ("import", "imports", INCOMING, "/imports/{id}"),
+    ("batch", "batches", INTERNAL, "/batchs/{id}"),
+    ("emailer_template_history", "emailer_templates", INTERNAL, "/emailer/template/{id}/history"),
     ("transaction_bundle_history", "transaction_bundles", INCOMING, "/v1/transaction_bundles/{id}/history"),
     ("user", "users", INCOMING, "/users/{id}"),
     ("team", "teams", INCOMING, "/teams/{id}"),
 ]
-PER_CONTACT = [("contact_history", "/contacts/{id}/history"), ("contact_notes", "/contacts/{id}/notes")]
+PER_CONTACT = [
+    ("contact_history", "/contacts/{id}/history"),
+    ("contact_notes", "/contacts/{id}/notes"),
+    ("contact_consent_history", "/contacts/{id}/consents/history"),
+    ("contact_consent_sources", "/contacts/{id}/consent-sources"),
+    ("contact_mandates", "/contacts/{id}/mandates"),
+    ("contact_facts", "/facts_by_contact_id/{id}"),
+    ("contact_memberships", "/v2/memberships/contact/{id}"),
+]
 
 METABASE = "https://metabase.qomon.app/api/embed/dashboard/"
 EVER = "now-50y/d"
@@ -552,8 +587,23 @@ class Archive:
             self.fail(name, "POST /search", f"{failures} of {len(jobs)} queries failed")
         log.info("end %s: %d records, %d failures, %d count mismatches", name, len(written), failures, mismatches)
 
-    def metabase(self):
+    def embed_tokens(self, dashboard_ids):
+        """Signed embed tokens for dashboards, fetched with the API key; the key itself never goes to Metabase."""
+        tokens = []
+        for dashboard_id in dashboard_ids:
+            response = self.api.call("GET", f"{INTERNAL}/metabase/embed/dashboard/{dashboard_id}")
+            url = ((response.json().get("data") or {}).get("url") or "") if response is not None and response.status_code < 300 else ""
+            match = re.search(r"/embed/dashboard/([\w.\-]+)", url)
+            if match:
+                tokens.append(match.group(1))
+            else:
+                self.fail(f"metabase_dashboard_{dashboard_id}", f"/metabase/embed/dashboard/{dashboard_id}",
+                          str(getattr(response, "status_code", "no response")))
+        return tokens
+
+    def metabase(self, dashboard_ids=()):
         tokens = [t for t in os.environ.get("QOMON_METABASE_TOKENS", "").split(",") if t]
+        tokens += self.embed_tokens(dashboard_ids)
         folder = self.root / "metabase"
         folder.mkdir(exist_ok=True)
         log.info("start metabase: %d dashboards", len(tokens))
@@ -657,6 +707,8 @@ def main():
         "--stages", default="contacts,lists,details,per-contact,contact-details,segments,metabase,assets"
     )
     parser.add_argument("--only", help="comma-separated list and detail names")
+    parser.add_argument("--dashboard-id", type=int, action="append", default=[],
+                        help="metabase stage: Qomon dashboard id (repeatable); ids are in the web app's /api/metabase/embed/dashboard/ID requests")
     parser.add_argument("--retry-failed", action="store_true")
     parser.add_argument("--contact-limit", type=int, help="per-contact stage: test on this many contacts")
     parser.add_argument("--contact-scope", choices=["activity", "sample", "all"], default="activity")
@@ -700,7 +752,7 @@ def main():
     if "segments" in stages:
         archive.segments()
     if "metabase" in stages:
-        archive.metabase()
+        archive.metabase(args.dashboard_id)
     if "assets" in stages:
         archive.assets()
 

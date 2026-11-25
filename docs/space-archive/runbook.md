@@ -1,5 +1,5 @@
 ---
-last-reviewed: 2026-11-02
+last-reviewed: 2026-11-25
 review-interval-days: 180
 ---
 
@@ -7,7 +7,7 @@ review-interval-days: 180
 
 Archive a Qomon space before it closes, and prove the archive restores with no network. The tools are in `tools/space-archive/`: `archive_space.py` reads the space into a folder of JSON, and `restore_archive.py` with `restore_checks.py` rebuilds it as SQLite and checks it against the source files.
 
-The archive holds every contact in the space. Keep it outside any git work tree, on an encrypted disk; both scripts refuse otherwise. Never paste archive contents, or counts from a real archive, into an issue or PR.
+The archive holds every contact in the space. Keep it outside any git work tree, on an encrypted disk; both scripts refuse otherwise. It also holds the space's third-party credentials (email provider, SMS, and Metabase keys) in `reference/my_group.json` and `reference/group.json`; rotate them when the space closes. Never paste archive contents, or counts from a real archive, into an issue or PR.
 
 ## Archive
 
@@ -23,21 +23,22 @@ Stages run in this order; `--stages` picks a subset.
 | Stage | What it reads | Requests |
 |---|---|---|
 | `contacts` | Every contact, with interactions and form answers, through `POST /search`; fails if the count differs from `POST /kpi` | 1 per 1,000 contacts |
-| `lists` | Space-level lists (actions, forms, surveys, email campaigns, donations, transactions, users, teams, and others) | about 80 |
-| `details` | One request per action, form, survey, import, email campaign and template, workflow, bundle, user, and team | 1 per record |
-| `per-contact` | `/contacts/{id}/history` and `/contacts/{id}/notes`; `--contact-scope activity` (default) covers contacts with interactions, form answers, or a recorded change, `sample` adds 200 others, `all` covers everyone | 2 per contact |
+| `lists` | Space-level lists (actions, forms, surveys, email campaigns, donations, transactions, users, teams, consents, imports, export history, online actions, billing and SMS balances, and others) | about 100 |
+| `details` | One request per action (detail, files, analytics, participants, facts), form, survey, import, batch, email campaign, email template (with its history), workflow, bundle, user, and team | 1 per record |
+| `per-contact` | For each contact: change history, notes, consent history, consent sources, mandates, facts, and membership status per year. `--contact-scope activity` (default) covers contacts with interactions, form answers, or a recorded change, `sample` adds 200 others, `all` covers everyone | 7 per contact |
 | `contact-details` | `/contacts/{id}`, which carries tags and custom fields that search leaves out | 1 per contact |
 | `segments` | Contact ids per email campaign (sent, opened, clicked), action, and online form | 1 per segment, plus pages |
-| `metabase` | Every card of each signed Metabase embed dashboard in `QOMON_METABASE_TOKENS` (comma-separated tokens copied from the Qomon dashboard pages) | 1 per card |
+| `metabase` | Every card of each signed Metabase embed dashboard: the ids given with `--dashboard-id` (repeatable; the web app requests `/api/metabase/embed/dashboard/ID` for each dashboard on screen, so the ids show in the browser's Network tab) and any tokens in `QOMON_METABASE_TOKENS` (comma-separated) | 1 per card |
 | `assets` | Images that Qomon's vendors host for templates and forms | 1 per image |
 
-Run `--contact-scope sample` before `all`: if the sample's history holds only import events and no notes, the rest of the contacts add nothing. `--workers` and `--requests-per-second` speed up per-id stages; concurrency halves on a 429, a 5xx, or a response slower than 15 seconds.
+The seven per-contact endpoints return empty lists for most contacts. Run `--contact-scope sample` before `all`: if the sample's history holds only import events and no notes, the rest of the contacts add nothing. `--workers` and `--requests-per-second` speed up per-id stages; concurrency halves on a 429, a 5xx, or a response slower than 15 seconds.
 
 A rerun skips finished endpoints and resumes per-id stages from the ids already written. `--retry-failed` retries endpoints in `manifest.json`'s `failed`; `--only NAME` runs single lists or details. `archive.log` records each endpoint's start and end with counts only.
 
-Failures seen as of 2026-10:
+Failures seen (2026-10 and 2026-11):
 - `emailer_campaign_report` returned 500 on 20 campaigns in a row; `emailer_campaign_kpi_v2` holds campaign results.
 - `import_columns` returned 400 on 20 imports in a row. Import settings are in `import_properties`.
+- `/online-forms/{id}` and `/online-actions/{id}` returned 500 on every id, so only the lists are archived.
 
 When every stage is done:
 
