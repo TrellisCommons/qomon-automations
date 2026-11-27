@@ -478,9 +478,12 @@ export class InMemoryQomon implements QomonApi {
     const { id, address, ...rest } = upsert;
     const fields = Object.fromEntries(
       Object.entries(rest).filter(
-        ([k]) =>
+        ([k, v]) =>
           !(FORM_ANSWER_KEYS as readonly string[]).includes(k) &&
-          k !== 'custom_fields',
+          k !== 'custom_fields' &&
+          // upsert can turn "Do not contact" on but not off (demo space,
+          // 2026-11-11)
+          !(k === 'black_list' && v !== true),
       ),
     );
     const customIds = new Set(customAnswers.map((a) => a.form_id));

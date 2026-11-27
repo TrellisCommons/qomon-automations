@@ -1,5 +1,6 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { decryptSecret } from '../crypto.js';
+import { tryAdvisoryLock } from '../lock.js';
 import { resolveWriteMode } from '../qomon/write-mode.js';
 import {
   SECRET_KEY,
@@ -127,5 +128,51 @@ describe('write guard', () => {
     expect(resolveWriteMode(testEnv(), space, false).blockedBy).toEqual([
       '--apply was not given',
     ]);
+  });
+
+  it('refuses to change a space while a run holds its lock', async () => {
+    await saveSpace(
+      prisma,
+      SECRET_KEY,
+      { ...config, qomonApiKey: 'sandbox-key', deceasedField: 'Deceased' },
+      'tester',
+    );
+    const run = await prisma.jobRun.create({
+      data: {
+        job: 'contact-rules',
+        spaceKey: 'example',
+        kind: 'HOURLY',
+        applying: true,
+      },
+    });
+    await prisma.handledDeceased.create({
+      data: {
+        spaceKey: 'example',
+        contactId: 1,
+        handling: 'WRITTEN',
+        runId: run.id,
+      },
+    });
+    const lock = await tryAdvisoryLock(
+      process.env.DATABASE_URL!,
+      'contact-rules:example',
+    );
+    try {
+      await expect(
+        saveSpace(
+          prisma,
+          SECRET_KEY,
+          { ...config, deceasedField: null },
+          'tester',
+        ),
+      ).rejects.toThrow(/a contact-rules run on space example is in progress/);
+    } finally {
+      await lock!.release();
+    }
+    expect(await prisma.handledDeceased.count()).toBe(1);
+    expect(
+      (await prisma.space.findUniqueOrThrow({ where: { key: 'example' } }))
+        .deceasedField,
+    ).toBe('Deceased');
   });
 });

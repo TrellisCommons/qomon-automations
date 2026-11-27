@@ -1,6 +1,10 @@
 import type { QomonContact, QomonForm } from '@trellis/qomon-client';
 import { describe, expect, it } from 'vitest';
-import { inMunicipality, normalizeCity, planHouseholdMatch } from './plan.js';
+import {
+  inMunicipality,
+  normalizeCity,
+  planHouseholdMatch,
+} from './household.js';
 import { PresenceConfigError, resolvePresenceConfig } from './presence.js';
 
 const FORM: QomonForm = {

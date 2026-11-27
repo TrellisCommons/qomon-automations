@@ -1,0 +1,1056 @@
+import {
+  QomonNotFoundError,
+  type QomonApi,
+  type QomonContact,
+  type QomonForm,
+} from '@trellis/qomon-client';
+import { InMemoryQomon } from '@trellis/qomon-client/fake';
+import { pino } from 'pino';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Env } from '../../env.js';
+import { tryAdvisoryLock } from '../../lock.js';
+import { runStatus } from '../../report.js';
+import { saveSpace } from '../../spaces/spaces.js';
+import {
+  makeSpace,
+  resetDb,
+  SECRET_KEY,
+  testEnv,
+  testPrisma,
+} from '../../test/db.js';
+import {
+  mergeUpserts,
+  runContactRules,
+  UsageError,
+  type RunDeps,
+  type RunOptions,
+} from './run.js';
+
+const prisma = testPrisma();
+afterAll(() => prisma.$disconnect());
+
+const FORM: QomonForm = {
+  id: 1,
+  label: 'Presence',
+  type: 'radio',
+  refvalues: [
+    { id: 11, value: 'present', label: 'present' },
+    { id: 12, value: 'absent', label: 'absent' },
+    { id: 13, value: 'refus', label: 'refusal' },
+    { id: 14, value: 'repasse', label: 'repasse' },
+  ],
+};
+
+function presence(value: string) {
+  const ref = FORM.refvalues.find((r) => r.value === value)!;
+  return [
+    {
+      form_id: FORM.id,
+      form_ref_id: ref.id,
+      data: value,
+      date: '2026-10-01T15:00:00Z',
+    },
+  ];
+}
+
+const MARKER: QomonForm = {
+  id: 2,
+  label: 'Presence source',
+  type: 'radio',
+  refvalues: [
+    { id: 21, value: 'household_match', label: 'Household match' },
+    { id: 22, value: 'recanvassed', label: 'Canvassed after household match' },
+  ],
+};
+const MARK = [{ form_id: MARKER.id, form_ref_id: 21, data: 'household_match' }];
+
+const DECEASED: QomonForm = {
+  id: 3,
+  label: 'Deceased',
+  type: 'checkbox',
+  refvalues: [
+    { id: 31, value: 'yes', label: 'DECEASED' },
+    { id: 32, value: 'no', label: 'NOT deceased' },
+  ],
+};
+const MARKED_DECEASED = [
+  { form_id: DECEASED.id, form_ref_id: 31, data: 'yes' },
+];
+
+/** the household value and its marker, as the job writes them */
+function householdWrite(c: QomonContact): boolean {
+  return (
+    presenceValue(c) === 'absent' &&
+    (c.custom_fields?.some((f) => f.form_ref_id === 21) ?? false)
+  );
+}
+
+function presenceValue(c: QomonContact): string | undefined {
+  return c.formdatas?.find((f) => f.form_id === FORM.id)?.data ?? undefined;
+}
+
+/** The fake with some methods replaced. Every other call goes to the fake
+ *  itself, so its state (including queued upserts) stays in one place. */
+function withOverrides(overrides: Partial<QomonApi>): QomonApi {
+  return new Proxy(qomon, {
+    get(target, prop, receiver) {
+      if (prop in overrides) return overrides[prop as keyof QomonApi];
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
+let qomon: InMemoryQomon;
+let ids: {
+  knocked: number;
+  housemate: number;
+  roommate: number;
+  neighbour: number;
+  alreadyAbsent: number;
+};
+
+function seed(q: InMemoryQomon) {
+  const at = (housenumber: string) => ({
+    housenumber,
+    street: 'Example St',
+    city: 'Exampleton',
+  });
+  ids = {
+    knocked: q.seedContact({
+      firstname: 'Ada',
+      address: at('345'),
+      formdatas: presence('present'),
+    }).id!,
+    housemate: q.seedContact({ firstname: 'Bo', address: at('345') }).id!,
+    roommate: q.seedContact({
+      firstname: 'Cy',
+      address: { ...at('345'), street: 'Example Street' },
+    }).id!,
+    alreadyAbsent: q.seedContact({
+      firstname: 'Di',
+      address: at('345'),
+      formdatas: presence('absent'),
+    }).id!,
+    neighbour: q.seedContact({ firstname: 'Ed', address: at('347') }).id!,
+  };
+}
+
+function deps(
+  overrides: Partial<RunDeps> & { env?: Env; api?: QomonApi } = {},
+): RunDeps & {
+  notify: ReturnType<typeof vi.fn>;
+} {
+  let clock = Date.parse('2026-10-10T12:00:00Z');
+  return {
+    prisma,
+    env: overrides.env ?? testEnv(),
+    log: pino({ level: 'silent' }),
+    qomonFor: () => overrides.api ?? qomon,
+    lock: async () => ({ release: async () => {} }),
+    notify: vi.fn(async () => {}),
+    now: () => new Date(clock),
+    sleep: async (ms) => {
+      clock += ms;
+    },
+    ...overrides,
+  } as RunDeps & { notify: ReturnType<typeof vi.fn> };
+}
+
+const hourly: RunOptions = {
+  spaceKey: 'test-space',
+  apply: true,
+  backfill: false,
+};
+
+beforeEach(async () => {
+  await resetDb(prisma);
+  qomon = new InMemoryQomon({
+    forms: { presence_status: [FORM], custom_fields: [MARKER, DECEASED] },
+  });
+  seed(qomon);
+});
+
+describe('household match run', () => {
+  it('writes, verifies, and change-logs the household value', async () => {
+    await makeSpace(prisma);
+    const d = deps();
+    const result = await runContactRules(d, hourly);
+
+    expect(result).toMatchObject({ status: 'SUCCEEDED', applying: true });
+    expect(result).toMatchObject({
+      stats: { planned: 2, applied: 2, verified: 2, failed: 0, skipped: 0 },
+    });
+    expect(householdWrite(await qomon.getContact(ids.housemate))).toBe(true);
+    expect(householdWrite(await qomon.getContact(ids.roommate))).toBe(true);
+    expect(presenceValue(await qomon.getContact(ids.alreadyAbsent))).toBe(
+      'absent',
+    );
+    expect(
+      presenceValue(await qomon.getContact(ids.neighbour)),
+    ).toBeUndefined();
+
+    const entries = await prisma.changeLogEntry.findMany({
+      where: { subjectType: 'QomonContact' },
+    });
+    expect(entries.map((e) => Number(e.subjectId)).sort()).toEqual(
+      [ids.housemate, ids.roommate].sort(),
+    );
+    expect(entries[0]).toMatchObject({
+      actor: 'contact-rules',
+      before: { presence: null },
+    });
+    // a successful run, writes or not, posts nothing
+    expect(d.notify).not.toHaveBeenCalled();
+  });
+
+  it('records the Presence date each write got, for telling its writes from later knocks', async () => {
+    await makeSpace(prisma);
+    await runContactRules(deps(), hourly);
+    const write = await prisma.plannedWrite.findFirstOrThrow({
+      where: { contactId: ids.housemate },
+    });
+    const current = (await qomon.getContact(ids.housemate)).formdatas!.find(
+      (f) => f.form_id === FORM.id,
+    )!;
+    expect(write.writtenPresenceDate).toBe(current.date);
+  });
+
+  it('fails a write that lands without its marker', async () => {
+    await makeSpace(prisma);
+    const api: QomonApi = withOverrides({
+      upsertContact: ({
+        custom_fields: _dropped,
+        ...rest
+      }: Parameters<QomonApi['upsertContact']>[0]) => qomon.upsertContact(rest),
+    });
+    const d = deps({ api });
+    const result = await runContactRules(d, hourly);
+    expect(result).toMatchObject({
+      status: 'SUCCEEDED',
+      stats: { applied: 2, verified: 0, failed: 2 },
+    });
+    // failed writes are what Slack is for, even when the run itself succeeds
+    expect(d.notify).toHaveBeenCalledOnce();
+    expect(d.notify.mock.calls[0]![0]).toMatch(/failed 2/);
+    expect(
+      (
+        await prisma.plannedWrite.findFirstOrThrow({
+          where: { status: 'FAILED' },
+        })
+      ).detail,
+    ).toBe('the household value is there without its marker');
+  });
+
+  it('re-marks a contact a person visits after the job wrote it, leaving their Presence', async () => {
+    await makeSpace(prisma);
+    await runContactRules(deps(), hourly);
+    // a canvasser records the housemate as present; the marker stays
+    qomon.seedContact({
+      ...(await qomon.getContact(ids.housemate)),
+      formdatas: presence('present'),
+    });
+
+    const second = await runContactRules(deps(), hourly);
+    expect(second).toMatchObject({
+      status: 'SUCCEEDED',
+      stats: { planned: 0, remarks: 1, verified: 1 },
+    });
+    const after = await qomon.getContact(ids.housemate);
+    expect(presenceValue(after)).toBe('present');
+    expect(
+      after.custom_fields?.find((f) => f.form_id === MARKER.id)?.form_ref_id,
+    ).toBe(22);
+    const entry = await prisma.changeLogEntry.findFirstOrThrow({
+      where: {
+        subjectId: String(ids.housemate),
+        before: { equals: { presenceSource: 'household_match' } },
+      },
+    });
+    expect(entry.after).toEqual({ presenceSource: 'recanvassed' });
+
+    // re-marking does not hide the job's other writes from it
+    const third = await runContactRules(deps(), hourly);
+    expect(third).toMatchObject({ stats: { planned: 0, remarks: 0 } });
+    expect(householdWrite(await qomon.getContact(ids.roommate))).toBe(true);
+  });
+
+  it('is idempotent: the next run plans nothing and stays quiet', async () => {
+    await makeSpace(prisma);
+    await runContactRules(deps(), hourly);
+    const d = deps();
+    const second = await runContactRules(d, hourly);
+    expect(second).toMatchObject({
+      status: 'SUCCEEDED',
+      stats: { planned: 0 },
+    });
+    expect(d.notify).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      'the environment',
+      { env: testEnv({ QOMON_WRITES_ALLOWED: false }) },
+      {},
+      hourly,
+    ],
+    ['the space', {}, { writesEnabled: false }, hourly],
+    ['the run', {}, {}, { ...hourly, apply: false }],
+  ])(
+    'plans but writes nothing unless %s allows it',
+    async (_name, depOverrides, spaceData, opts) => {
+      await makeSpace(prisma, spaceData);
+      const d = deps(depOverrides);
+      const result = await runContactRules(d, opts);
+      expect(result).toMatchObject({
+        status: 'SUCCEEDED',
+        applying: false,
+        stats: { planned: 2 },
+      });
+      expect(
+        presenceValue(await qomon.getContact(ids.housemate)),
+      ).toBeUndefined();
+      expect(
+        await prisma.plannedWrite.count({ where: { status: 'PLANNED' } }),
+      ).toBe(2);
+      expect(d.notify).not.toHaveBeenCalled();
+    },
+  );
+
+  it('trips when an hourly run plans more than the limit, and turns the space off', async () => {
+    await makeSpace(prisma);
+    const d = deps({ env: testEnv({ MAX_WRITES_PER_RUN: 1 }) });
+    const result = await runContactRules(d, hourly);
+    expect(result).toMatchObject({
+      status: 'TRIPPED',
+      stats: { planned: 2, overLimit: true },
+    });
+    expect(
+      presenceValue(await qomon.getContact(ids.housemate)),
+    ).toBeUndefined();
+    expect(
+      (await prisma.space.findUniqueOrThrow({ where: { key: 'test-space' } }))
+        .writesEnabled,
+    ).toBe(false);
+    expect(
+      await prisma.changeLogEntry.count({ where: { subjectType: 'Space' } }),
+    ).toBe(1);
+    expect(d.notify.mock.calls[0]![0]).toMatch(/Writes are now off/);
+  });
+
+  it('a backfill over --max-writes writes nothing but leaves the space on', async () => {
+    await makeSpace(prisma);
+    const result = await runContactRules(deps(), {
+      ...hourly,
+      backfill: true,
+      maxWrites: 1,
+    });
+    expect(result).toMatchObject({ status: 'TRIPPED' });
+    expect(
+      presenceValue(await qomon.getContact(ids.housemate)),
+    ).toBeUndefined();
+    expect(
+      (await prisma.space.findUniqueOrThrow({ where: { key: 'test-space' } }))
+        .writesEnabled,
+    ).toBe(true);
+  });
+
+  it('a backfill within --max-writes applies past MAX_WRITES_PER_RUN', async () => {
+    await makeSpace(prisma);
+    const d = deps({ env: testEnv({ MAX_WRITES_PER_RUN: 1 }) });
+    const result = await runContactRules(d, {
+      ...hourly,
+      backfill: true,
+      maxWrites: 2,
+    });
+    expect(result).toMatchObject({
+      status: 'SUCCEEDED',
+      stats: { verified: 2 },
+    });
+    expect(await prisma.jobRun.findFirst()).toMatchObject({ kind: 'BACKFILL' });
+  });
+
+  it('refuses to apply a backfill without --max-writes, but dry-runs one', async () => {
+    await makeSpace(prisma);
+    await expect(
+      runContactRules(deps(), { ...hourly, backfill: true }),
+    ).rejects.toBeInstanceOf(UsageError);
+    const dry = await runContactRules(deps(), {
+      ...hourly,
+      apply: false,
+      backfill: true,
+    });
+    expect(dry).toMatchObject({
+      status: 'SUCCEEDED',
+      applying: false,
+      stats: { planned: 2 },
+    });
+  });
+
+  it('skips a contact that got a Presence after the fetch', async () => {
+    await makeSpace(prisma);
+    // a canvasser records a visit between the search and the write
+    const api: QomonApi = withOverrides({
+      searchContacts: async (
+        params: Parameters<QomonApi['searchContacts']>[0],
+      ) => {
+        const page = await qomon.searchContacts(params);
+        const current = await qomon.getContact(ids.housemate);
+        qomon.seedContact({ ...current, formdatas: presence('repasse') });
+        return page;
+      },
+    });
+    const result = await runContactRules(deps({ api }), hourly);
+    expect(result).toMatchObject({
+      status: 'SUCCEEDED',
+      stats: { planned: 2, skipped: 1, verified: 1 },
+    });
+    expect(presenceValue(await qomon.getContact(ids.housemate))).toBe(
+      'repasse',
+    );
+    expect(
+      await prisma.plannedWrite.findFirst({
+        where: { contactId: ids.housemate },
+      }),
+    ).toMatchObject({
+      status: 'SKIPPED',
+    });
+  });
+
+  it('skips a contact whose address changed after the fetch', async () => {
+    await makeSpace(prisma);
+    const api: QomonApi = withOverrides({
+      searchContacts: async (
+        params: Parameters<QomonApi['searchContacts']>[0],
+      ) => {
+        const page = await qomon.searchContacts(params);
+        const current = await qomon.getContact(ids.housemate);
+        qomon.seedContact({
+          ...current,
+          address: {
+            housenumber: '351',
+            street: 'Example St',
+            city: 'Exampleton',
+          },
+        });
+        return page;
+      },
+    });
+    const result = await runContactRules(deps({ api }), hourly);
+    expect(result).toMatchObject({
+      status: 'SUCCEEDED',
+      stats: { planned: 2, skipped: 1, verified: 1 },
+    });
+    expect(
+      presenceValue(await qomon.getContact(ids.housemate)),
+    ).toBeUndefined();
+    expect(
+      await prisma.plannedWrite.findFirst({
+        where: { contactId: ids.housemate },
+      }),
+    ).toMatchObject({
+      status: 'SKIPPED',
+      detail: 'address changed since the fetch',
+    });
+  });
+
+  it('fails a write whose contact is deleted before it is read back', async () => {
+    await makeSpace(prisma);
+    let reads = 0;
+    const api: QomonApi = withOverrides({
+      getContact: async (id: number) => {
+        // the first read is the re-read before writing; later ones verify
+        if (id === ids.housemate && ++reads > 1)
+          throw new QomonNotFoundError('contact not found', {
+            method: 'GET',
+            path: `/contacts/${id}`,
+            attempt: 1,
+            httpStatus: 404,
+          });
+        return qomon.getContact(id);
+      },
+    });
+    const d = deps({ api });
+    const result = await runContactRules(d, hourly);
+    expect(result).toMatchObject({ stats: { verified: 1, failed: 1 } });
+    expect(
+      await prisma.plannedWrite.findFirst({
+        where: { contactId: ids.housemate },
+      }),
+    ).toMatchObject({
+      status: 'FAILED',
+      detail: 'contact deleted before it could be verified',
+    });
+  });
+
+  it('a write that never shows up fails, and too many failures trip the breaker', async () => {
+    await makeSpace(prisma);
+    const api: QomonApi = withOverrides({
+      upsertContact: async () => {},
+    });
+    const d = deps({ api, env: testEnv({ MIN_WRITES_FOR_FAILED_SHARE: 2 }) });
+    const result = await runContactRules(d, hourly);
+    expect(result).toMatchObject({
+      status: 'TRIPPED',
+      stats: { applied: 2, verified: 0, failed: 2 },
+    });
+    const failed = await prisma.plannedWrite.findMany({
+      where: { status: 'FAILED' },
+    });
+    expect(failed.map((w) => w.detail)).toEqual([
+      'not visible after 30s',
+      'not visible after 30s',
+    ]);
+    expect(
+      (await prisma.space.findUniqueOrThrow({ where: { key: 'test-space' } }))
+        .writesEnabled,
+    ).toBe(false);
+  });
+
+  it('fails without planning when the household value is not on the form', async () => {
+    await makeSpace(prisma, { householdValue: 'Absent (other)' });
+    const d = deps();
+    const result = await runContactRules(d, hourly);
+    expect(result).toMatchObject({ status: 'FAILED' });
+    expect('error' in result && result.error).toMatch(
+      /not on the Presence form/,
+    );
+    expect(await prisma.plannedWrite.count()).toBe(0);
+    expect(d.notify).toHaveBeenCalledOnce();
+  });
+
+  it('does nothing after activeUntil', async () => {
+    await makeSpace(prisma, { activeUntil: new Date('2026-10-01T00:00:00Z') });
+    expect(await runContactRules(deps(), hourly)).toEqual({
+      status: 'inactive',
+    });
+    expect(await prisma.jobRun.count()).toBe(0);
+  });
+
+  it('exits when another run holds the lock', async () => {
+    await makeSpace(prisma);
+    expect(
+      await runContactRules(deps({ lock: async () => null }), hourly),
+    ).toEqual({ status: 'locked' });
+    expect(await prisma.jobRun.count()).toBe(0);
+  });
+});
+
+describe('progress and restarts', () => {
+  it('saves progress on the run, and status shows it', async () => {
+    await makeSpace(prisma);
+    const result = await runContactRules(deps(), hourly);
+    const run = await prisma.jobRun.findUniqueOrThrow({
+      where: { id: 'runId' in result ? result.runId : '' },
+    });
+    expect(run.stats).toMatchObject({ progress: { done: 2, total: 2 } });
+    expect(await runStatus(prisma, 'test-space')).toMatch(
+      /progress 2\/2 \(100%\)/,
+    );
+  });
+
+  it('a successful backfill posts nothing to Slack', async () => {
+    await makeSpace(prisma);
+    const d = deps();
+    const result = await runContactRules(d, {
+      ...hourly,
+      backfill: true,
+      maxWrites: 10,
+    });
+    expect(result).toMatchObject({
+      status: 'SUCCEEDED',
+      stats: { verified: 2 },
+    });
+    expect(d.notify).not.toHaveBeenCalled();
+  });
+
+  it('stops cleanly on a signal: verifies what was sent, and the next run does the rest', async () => {
+    await makeSpace(prisma);
+    const stop = new AbortController();
+    const api: QomonApi = withOverrides({
+      upsertContact: async (c: Parameters<QomonApi['upsertContact']>[0]) => {
+        await qomon.upsertContact(c);
+        stop.abort();
+      },
+    });
+    const stopped = deps({ api, signal: stop.signal });
+    const first = await runContactRules(stopped, hourly);
+    // a stop on purpose is not a failure
+    expect(stopped.notify).not.toHaveBeenCalled();
+    expect(first).toMatchObject({
+      status: 'INTERRUPTED',
+      stats: { applied: 1, verified: 1 },
+    });
+    expect(
+      await prisma.plannedWrite.count({ where: { status: 'APPLYING' } }),
+    ).toBe(0);
+    expect(
+      await prisma.plannedWrite.findFirst({ where: { status: 'SKIPPED' } }),
+    ).toMatchObject({
+      detail: 'run interrupted before this write',
+    });
+
+    const second = await runContactRules(deps(), hourly);
+    expect(second).toMatchObject({
+      status: 'SUCCEEDED',
+      stats: { planned: 1, verified: 1 },
+    });
+    expect(householdWrite(await qomon.getContact(ids.housemate))).toBe(true);
+    expect(householdWrite(await qomon.getContact(ids.roommate))).toBe(true);
+  });
+
+  it('settles a run that was killed outright before planning again', async () => {
+    const space = await makeSpace(prisma);
+    // a killed run: one write landed but was never read back, one was sent
+    // and dropped, one never attempted
+    qomon.seedContact({
+      ...(await qomon.getContact(ids.roommate)),
+      formdatas: presence('absent'),
+      custom_fields: MARK,
+    });
+    const dead = await prisma.jobRun.create({
+      data: {
+        job: 'contact-rules',
+        spaceKey: space.key,
+        kind: 'BACKFILL',
+        applying: true,
+      },
+    });
+    const write = (
+      contactId: number,
+      status: 'APPLYING' | 'APPLIED' | 'PLANNED',
+    ) => ({
+      runId: dead.id,
+      contactId,
+      field: 'presence',
+      valueAfter: 'absent',
+      triggerContactId: ids.knocked,
+      reason: 'test',
+      status,
+    });
+    await prisma.plannedWrite.createMany({
+      data: [
+        write(ids.roommate, 'APPLYING'),
+        write(ids.housemate, 'APPLIED'),
+        write(ids.neighbour, 'PLANNED'),
+      ],
+    });
+
+    const result = await runContactRules(deps(), hourly);
+    expect(result).toMatchObject({
+      status: 'SUCCEEDED',
+      stats: { reconciled: 2, planned: 1, verified: 1 },
+    });
+    expect(
+      await prisma.jobRun.findUniqueOrThrow({ where: { id: dead.id } }),
+    ).toMatchObject({
+      status: 'INTERRUPTED',
+      error: expect.stringMatching(/^abandoned; settled by run /),
+    });
+    const settled = await prisma.plannedWrite.findMany({
+      where: { runId: dead.id },
+      orderBy: { contactId: 'asc' },
+    });
+    expect(
+      Object.fromEntries(settled.map((w) => [w.contactId, w.status])),
+    ).toEqual({
+      [ids.roommate]: 'VERIFIED',
+      [ids.housemate]: 'FAILED',
+      [ids.neighbour]: 'SKIPPED',
+    });
+  });
+});
+
+describe('advisory lock', () => {
+  it('admits one holder at a time', async () => {
+    const url = process.env.DATABASE_URL!;
+    const first = await tryAdvisoryLock(url, 'contact-rules:lock-test');
+    expect(first).not.toBeNull();
+    expect(await tryAdvisoryLock(url, 'contact-rules:lock-test')).toBeNull();
+    await first!.release();
+    const again = await tryAdvisoryLock(url, 'contact-rules:lock-test');
+    expect(again).not.toBeNull();
+    await again!.release();
+  });
+});
+
+describe('deceased rule', () => {
+  const withDeceased = { deceasedField: 'Deceased' };
+
+  async function setContact(id: number, changes: Partial<QomonContact>) {
+    qomon.seedContact({ ...(await qomon.getContact(id)), ...changes });
+  }
+
+  it('turns "Do not contact" on, verifies it, and records the contact as handled', async () => {
+    await makeSpace(prisma, withDeceased);
+    await setContact(ids.neighbour, { custom_fields: MARKED_DECEASED });
+
+    const result = await runContactRules(deps(), hourly);
+    expect(result).toMatchObject({
+      status: 'SUCCEEDED',
+      stats: { deceased: 1, deceasedPlanned: 1, failed: 0 },
+    });
+    expect((await qomon.getContact(ids.neighbour)).black_list).toBe(true);
+    expect(
+      await prisma.handledDeceased.findUniqueOrThrow({
+        where: {
+          spaceKey_contactId: {
+            spaceKey: 'test-space',
+            contactId: ids.neighbour,
+          },
+        },
+      }),
+    ).toMatchObject({ handling: 'WRITTEN' });
+    const entry = await prisma.changeLogEntry.findFirstOrThrow({
+      where: { subjectId: String(ids.neighbour) },
+    });
+    expect(entry).toMatchObject({
+      before: { blocklisted: false },
+      after: { blocklisted: true },
+    });
+  });
+
+  it('sends one upsert carrying every change to a contact', async () => {
+    await makeSpace(prisma, withDeceased);
+    await setContact(ids.housemate, { custom_fields: MARKED_DECEASED });
+    const upserts: number[] = [];
+    const api = withOverrides({
+      upsertContact: (c: Parameters<QomonApi['upsertContact']>[0]) => {
+        upserts.push(c.id);
+        return qomon.upsertContact(c);
+      },
+    });
+
+    const result = await runContactRules(deps({ api }), hourly);
+    expect(result).toMatchObject({
+      stats: { planned: 2, deceasedPlanned: 1, verified: 3, failed: 0 },
+    });
+    expect(upserts.filter((id) => id === ids.housemate)).toHaveLength(1);
+    const housemate = await qomon.getContact(ids.housemate);
+    expect(householdWrite(housemate)).toBe(true);
+    expect(housemate.black_list).toBe(true);
+  });
+
+  it('acts once per marking: a person turning "Do not contact" off wins', async () => {
+    await makeSpace(prisma, withDeceased);
+    await setContact(ids.neighbour, { custom_fields: MARKED_DECEASED });
+    await runContactRules(deps(), hourly);
+    await setContact(ids.neighbour, { black_list: false });
+
+    const second = await runContactRules(deps(), hourly);
+    expect(second).toMatchObject({ stats: { deceasedPlanned: 0 } });
+    expect((await qomon.getContact(ids.neighbour)).black_list).toBe(false);
+  });
+
+  it('acts again once the mark is removed and set again', async () => {
+    await makeSpace(prisma, withDeceased);
+    await setContact(ids.neighbour, { custom_fields: MARKED_DECEASED });
+    await runContactRules(deps(), hourly);
+    await setContact(ids.neighbour, { black_list: false, custom_fields: [] });
+
+    const unmarked = await runContactRules(deps(), hourly);
+    expect(unmarked).toMatchObject({ review: [] });
+    expect(await prisma.handledDeceased.count()).toBe(0);
+
+    await setContact(ids.neighbour, { custom_fields: MARKED_DECEASED });
+    const remarked = await runContactRules(deps(), hourly);
+    expect(remarked).toMatchObject({
+      stats: { deceasedPlanned: 1, verified: 1 },
+    });
+    expect((await qomon.getContact(ids.neighbour)).black_list).toBe(true);
+  });
+
+  it('records a contact already "Do not contact" as handled without writing', async () => {
+    await makeSpace(prisma, withDeceased);
+    await setContact(ids.neighbour, {
+      custom_fields: MARKED_DECEASED,
+      black_list: true,
+    });
+
+    const result = await runContactRules(deps(), hourly);
+    expect(result).toMatchObject({
+      stats: { deceased: 1, deceasedPlanned: 0 },
+    });
+    expect(await prisma.handledDeceased.findFirstOrThrow()).toMatchObject({
+      contactId: ids.neighbour,
+      handling: 'FOUND',
+    });
+  });
+
+  it('asks a person to decide when a contact it blocklisted is no longer marked', async () => {
+    await makeSpace(prisma, withDeceased);
+    await setContact(ids.neighbour, { custom_fields: MARKED_DECEASED });
+    await runContactRules(deps(), hourly);
+    await setContact(ids.neighbour, { custom_fields: [] });
+
+    const d = deps();
+    const result = await runContactRules(d, hourly);
+    expect(result).toMatchObject({
+      status: 'SUCCEEDED',
+      review: [ids.neighbour],
+    });
+    expect(d.notify).toHaveBeenCalledOnce();
+    expect(d.notify.mock.calls[0]![0]).toMatch(
+      new RegExp(`no longer marked deceased.*${ids.neighbour}`),
+    );
+    expect((await qomon.getContact(ids.neighbour)).black_list).toBe(true);
+  });
+
+  it('is off for a space without a deceased field', async () => {
+    await makeSpace(prisma);
+    await setContact(ids.neighbour, { custom_fields: MARKED_DECEASED });
+    const result = await runContactRules(deps(), hourly);
+    expect(result.status).toBe('SUCCEEDED');
+    expect((await qomon.getContact(ids.neighbour)).black_list).toBeUndefined();
+  });
+
+  it('fails the run when the deceased field is missing from the space', async () => {
+    await makeSpace(prisma, { deceasedField: 'Passed away' });
+    const result = await runContactRules(deps(), hourly);
+    expect(result).toMatchObject({ status: 'FAILED' });
+    expect('error' in result && result.error).toMatch(
+      /DeceasedConfigError: expected one custom field labelled "Passed away"/,
+    );
+  });
+
+  it('counts "Do not contact" writes toward the write limit', async () => {
+    await makeSpace(prisma, withDeceased);
+    await setContact(ids.neighbour, { custom_fields: MARKED_DECEASED });
+    const result = await runContactRules(
+      deps({ env: testEnv({ MAX_WRITES_PER_RUN: 2 }) }),
+      hourly,
+    );
+    expect(result).toMatchObject({
+      status: 'TRIPPED',
+      stats: { planned: 2, deceasedPlanned: 1, plannedWrites: 3 },
+    });
+  });
+
+  it('fails a "Do not contact" write that never shows up, and records it as sent', async () => {
+    await makeSpace(prisma, withDeceased);
+    await setContact(ids.neighbour, { custom_fields: MARKED_DECEASED });
+    const api = withOverrides({
+      upsertContact: async (c: Parameters<QomonApi['upsertContact']>[0]) => {
+        if (c.black_list) return;
+        return qomon.upsertContact(c);
+      },
+    });
+    const d = deps({ api });
+    const result = await runContactRules(d, hourly);
+    expect(result).toMatchObject({
+      stats: { deceasedPlanned: 1, verified: 2, failed: 1 },
+    });
+    expect(
+      await prisma.plannedWrite.findFirst({
+        where: { contactId: ids.neighbour },
+      }),
+    ).toMatchObject({ status: 'FAILED', detail: 'not visible after 30s' });
+    expect(await prisma.handledDeceased.findFirstOrThrow()).toMatchObject({
+      contactId: ids.neighbour,
+      handling: 'SENT',
+    });
+    expect(d.notify).toHaveBeenCalledOnce();
+  });
+
+  it('skips a contact no longer marked deceased when it is re-read', async () => {
+    await makeSpace(prisma, withDeceased);
+    await setContact(ids.neighbour, { custom_fields: MARKED_DECEASED });
+    const api: QomonApi = withOverrides({
+      searchContacts: async (
+        params: Parameters<QomonApi['searchContacts']>[0],
+      ) => {
+        const page = await qomon.searchContacts(params);
+        await setContact(ids.neighbour, { custom_fields: [] });
+        return page;
+      },
+    });
+    const result = await runContactRules(deps({ api }), hourly);
+    expect(result).toMatchObject({ stats: { deceasedPlanned: 1, skipped: 1 } });
+    expect((await qomon.getContact(ids.neighbour)).black_list).toBeUndefined();
+    expect(
+      await prisma.plannedWrite.findFirst({
+        where: { contactId: ids.neighbour },
+      }),
+    ).toMatchObject({ status: 'SKIPPED', detail: 'no longer marked deceased' });
+  });
+
+  it('skips a contact a person turned "Do not contact" on for after the fetch', async () => {
+    await makeSpace(prisma, withDeceased);
+    await setContact(ids.neighbour, { custom_fields: MARKED_DECEASED });
+    const upserts: number[] = [];
+    const api: QomonApi = withOverrides({
+      searchContacts: async (
+        params: Parameters<QomonApi['searchContacts']>[0],
+      ) => {
+        const page = await qomon.searchContacts(params);
+        await setContact(ids.neighbour, { black_list: true });
+        return page;
+      },
+      upsertContact: (c: Parameters<QomonApi['upsertContact']>[0]) => {
+        upserts.push(c.id);
+        return qomon.upsertContact(c);
+      },
+    });
+    const result = await runContactRules(deps({ api }), hourly);
+    expect(result).toMatchObject({ stats: { deceasedPlanned: 1, skipped: 1 } });
+    expect(upserts).not.toContain(ids.neighbour);
+    expect(
+      await prisma.plannedWrite.findFirst({
+        where: { contactId: ids.neighbour },
+      }),
+    ).toMatchObject({ status: 'SKIPPED', detail: 'already "Do not contact"' });
+  });
+
+  it('lists a contact for review again when the Slack message about it fails', async () => {
+    await makeSpace(prisma, withDeceased);
+    await setContact(ids.neighbour, { custom_fields: MARKED_DECEASED });
+    await runContactRules(deps(), hourly);
+    await setContact(ids.neighbour, { custom_fields: [] });
+
+    const slackDown = deps({
+      notify: vi.fn(async () => {
+        throw new Error('Slack answered 503');
+      }),
+    });
+    await runContactRules(slackDown, hourly);
+
+    const d = deps();
+    const next = await runContactRules(d, hourly);
+    expect(next).toMatchObject({ review: [ids.neighbour] });
+    expect(d.notify).toHaveBeenCalledOnce();
+  });
+
+  async function unmarkManyAfterBlocklisting(n: number): Promise<number[]> {
+    const marked = Array.from(
+      { length: n },
+      (_, i) =>
+        qomon.seedContact({
+          firstname: `Dee${i}`,
+          address: { housenumber: String(500 + i), street: 'Example St' },
+          custom_fields: MARKED_DECEASED,
+        }).id!,
+    );
+    await runContactRules(deps(), hourly);
+    for (const id of marked) await setContact(id, { custom_fields: [] });
+    return marked;
+  }
+
+  it('lists every contact id when up to 20 need review', async () => {
+    await makeSpace(prisma, withDeceased);
+    const marked = await unmarkManyAfterBlocklisting(20);
+
+    const d = deps();
+    await runContactRules(d, hourly);
+    const text = d.notify.mock.calls[0]![0] as string;
+    for (const id of marked) expect(text).toMatch(new RegExp(`\\b${id}\\b`));
+    expect(
+      await prisma.handledDeceased.count({
+        where: { handling: 'REVIEW', reviewNotifiedAt: { not: null } },
+      }),
+    ).toBe(20);
+  });
+
+  it('lists no contact ids when more than 20 need review, and points to job review', async () => {
+    await makeSpace(prisma, withDeceased);
+    const marked = await unmarkManyAfterBlocklisting(21);
+
+    const d = deps();
+    await runContactRules(d, hourly);
+    const text = d.notify.mock.calls[0]![0] as string;
+    expect(text).toMatch(/21 contacts/);
+    expect(text).toMatch(/job review --space test-space/);
+    for (const id of marked)
+      expect(text).not.toMatch(new RegExp(`\\b${id}\\b`));
+  });
+
+  it('treats a "Do not contact" write that lands after verification gave up as its own', async () => {
+    await makeSpace(prisma, withDeceased);
+    await setContact(ids.neighbour, { custom_fields: MARKED_DECEASED });
+    const dropsBlocklist = withOverrides({
+      upsertContact: async (c: Parameters<QomonApi['upsertContact']>[0]) => {
+        if (c.black_list) return;
+        return qomon.upsertContact(c);
+      },
+    });
+    await runContactRules(deps({ api: dropsBlocklist }), hourly);
+    // the upsert the job sent shows up after VERIFY_TIMEOUT_SECONDS
+    await setContact(ids.neighbour, { black_list: true });
+    await runContactRules(deps(), hourly);
+    await setContact(ids.neighbour, { custom_fields: [] });
+
+    const result = await runContactRules(deps(), hourly);
+    expect(result).toMatchObject({ review: [ids.neighbour] });
+  });
+
+  it('treats a "Do not contact" write as its own when the run fails after sending it', async () => {
+    await makeSpace(prisma, withDeceased);
+    await setContact(ids.neighbour, { custom_fields: MARKED_DECEASED });
+    let sent = false;
+    const failsAfterSending = withOverrides({
+      upsertContact: async (c: Parameters<QomonApi['upsertContact']>[0]) => {
+        await qomon.upsertContact(c);
+        if (c.black_list) sent = true;
+      },
+      getContact: async (id: number) => {
+        if (sent) throw new Error('connection reset');
+        return qomon.getContact(id);
+      },
+    });
+    const failed = await runContactRules(
+      deps({ api: failsAfterSending }),
+      hourly,
+    );
+    expect(failed.status).toBe('FAILED');
+    await runContactRules(deps(), hourly);
+    await setContact(ids.neighbour, { custom_fields: [] });
+
+    const result = await runContactRules(deps(), hourly);
+    expect(result).toMatchObject({ review: [ids.neighbour] });
+  });
+
+  it('acts on a contact marked again while the rule was off', async () => {
+    await makeSpace(prisma, withDeceased);
+    await setContact(ids.neighbour, { custom_fields: MARKED_DECEASED });
+    await runContactRules(deps(), hourly);
+
+    const configure = (deceasedField: string | null) =>
+      saveSpace(
+        prisma,
+        SECRET_KEY,
+        {
+          key: 'test-space',
+          name: 'Test campaign',
+          canvassedValues: ['present', 'absent', 'refus', 'repasse'],
+          deceasedField,
+        },
+        'test',
+      );
+    await configure(null);
+    await setContact(ids.neighbour, { black_list: false, custom_fields: [] });
+    await runContactRules(deps(), hourly);
+    await setContact(ids.neighbour, { custom_fields: MARKED_DECEASED });
+    await configure('Deceased');
+
+    const result = await runContactRules(deps(), hourly);
+    expect(result).toMatchObject({ stats: { deceasedPlanned: 1 } });
+    expect((await qomon.getContact(ids.neighbour)).black_list).toBe(true);
+  });
+});
+
+describe('mergeUpserts', () => {
+  it('concatenates array fields and keeps scalar ones', () => {
+    expect(
+      mergeUpserts(9, [
+        { custom_fields: [{ id: 1, value: 'a' }] },
+        { custom_fields: [{ id: 2, value: 'b' }], black_list: true },
+      ]),
+    ).toEqual({
+      id: 9,
+      custom_fields: [
+        { id: 1, value: 'a' },
+        { id: 2, value: 'b' },
+      ],
+      black_list: true,
+    });
+  });
+});

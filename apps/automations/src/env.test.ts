@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { loadEnv } from './env.js';
 
 const base = { DATABASE_URL: 'postgresql://user:pass@localhost:5432/db' };
+const slack = { SLACK_BOT_TOKEN: 'xoxb-test', SLACK_CHANNEL: '#alerts' };
 
 describe('loadEnv', () => {
   it('leaves Qomon writes off unless explicitly allowed', () => {
@@ -10,8 +11,22 @@ describe('loadEnv', () => {
       loadEnv({ ...base, QOMON_WRITES_ALLOWED: 'false' }).QOMON_WRITES_ALLOWED,
     ).toBe(false);
     expect(
-      loadEnv({ ...base, QOMON_WRITES_ALLOWED: 'true' }).QOMON_WRITES_ALLOWED,
+      loadEnv({ ...base, ...slack, QOMON_WRITES_ALLOWED: 'true' })
+        .QOMON_WRITES_ALLOWED,
     ).toBe(true);
+  });
+
+  it('refuses to allow writes without Slack, which carries alerts and review prompts', () => {
+    expect(() => loadEnv({ ...base, QOMON_WRITES_ALLOWED: 'true' })).toThrow(
+      /SLACK_BOT_TOKEN.*\n.*SLACK_CHANNEL/,
+    );
+    expect(() =>
+      loadEnv({
+        ...base,
+        QOMON_WRITES_ALLOWED: 'true',
+        SLACK_BOT_TOKEN: 'xoxb-test',
+      }),
+    ).toThrow(/SLACK_CHANNEL/);
   });
 
   it('rejects a writes flag that is not exactly true or false', () => {
